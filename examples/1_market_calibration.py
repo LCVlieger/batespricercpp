@@ -2,140 +2,135 @@ import os
 import numpy as np
 import pandas as pd
 from datetime import datetime
-from scipy.optimize import minimize
+from sklearn.linear_model import LinearRegression
+from scipy.stats import norm
+from scipy.interpolate import PchipInterpolator
 
-# Assuming these are available from your local module
+# Assuming these are your existing utility functions
 from heston_pricer.data import (
     fetch_treasury_rates_fred, get_market_implied_spot, 
-    fetch_options, fetch_raw_data, ImpliedDividendCurve
+    fetch_options, fetch_raw_data
 )
+from heston_pricer.calibration import HestonCalibrator
 
-# ---------------------------------------------------------
-# STABLE ANALYTICAL PRICER (NON-SCALED)
-# ---------------------------------------------------------
-class HestonAnalyticalPricer:
-    @staticmethod
-    def price_european_call_vectorized(S0, K, T, r, q, kappa, theta, xi, rho, v0):
-        # High density grid for numerical stability with large index values
-        N_grid, u_max = 250, 100.0
-        du = u_max / N_grid
-        u = np.linspace(1e-8, u_max, N_grid)[:, np.newaxis] 
-        
-        K, T, r, q = np.atleast_1d(K), np.atleast_1d(T), np.atleast_1d(r), np.atleast_1d(q)
-        T_mat, r_mat, q_mat, K_mat = T[np.newaxis,:], r[np.newaxis,:], q[np.newaxis,:], K[np.newaxis,:]
-
-        def get_cf(phi):
-            xi_s = np.maximum(xi, 1e-6)
-            d = np.sqrt((rho * xi_s * phi * 1j - kappa)**2 + xi_s**2 * (phi * 1j + phi**2))
-            g = (kappa - rho * xi_s * phi * 1j - d) / (kappa - rho * xi_s * phi * 1j + d)
+# =================================================================
+# 1. ROBUST DIVIDEND ENGINE (REGRESSION METHOD)
+# =================================================================
+class ImpliedDividendCurve:
+    """
+    Extracts implied dividends by regressing the entire strike cross-section.
+    Solves: (C - P) = [exp(-rT) * F] - [exp(-rT)] * K
+    """
+    def __init__(self, df: pd.DataFrame, S0: float, r_curve):
+        self.yields = {}
+        for T in sorted(df['T'].unique()):
+            if T < 0.005: continue
             
-            exp_neg_dT = np.exp(-d * T_mat)
+            # 1. Define the mask first using the original dataframe 'df'
+            mask = (df['T'] == T) & (df['STRIKE'] > S0 * 0.85) & (df['STRIKE'] < S0 * 1.15)
+            subset = df[mask].dropna(subset=['C_MID', 'P_MID'])
             
-            # Albrecher (2007) stable formulation
-            C = (1/xi_s**2) * ((1 - exp_neg_dT) / (1 - g * exp_neg_dT)) * (kappa - rho * xi_s * phi * 1j - d)
-            D = (kappa * theta / xi_s**2) * ((kappa - rho * xi_s * phi * 1j - d) * T_mat - 
-                2 * (np.log(1 - g * exp_neg_dT) - np.log(1 - g + 1e-15)))
+            # 2. Need at least a few points for a valid linear regression
+            if len(subset) < 5: 
+                continue
             
-            # Drift uses the actual S0 price
-            drift = 1j * phi * np.log(S0 * np.exp((r_mat - q_mat) * T_mat))
-            return np.exp(C * v0 + D + drift)
+            r = r_curve.get_rate(T)
+            X = subset['STRIKE'].values.reshape(-1, 1)
+            y = (subset['C_MID'] - subset['P_MID']).values
+            
+            # 3. Linear Regression to find the Implied Forward
+            reg = LinearRegression().fit(X, y)
+            
+            # Slope (coef_) is -exp(-rT). Intercept is exp(-rT) * F.
+            # We use the absolute value of the slope to get the discount factor.
+            implied_discount = -reg.coef_[0] 
+            
+            # Safety check: discount factor should be positive and reasonably near 1
+            if implied_discount <= 0:
+                continue
+                
+            implied_F = reg.intercept_ / implied_discount
+            
+            # 4. Solve for q: F = S0 * exp((r - q) * T) -> q = r - ln(F/S0)/T
+            q = r - (np.log(implied_F / S0) / T)
+            
+            # Sanity Check: Keep q within realistic market bounds (-2% to 15%)
+            if 0.15 > q > -0.02:
+                self.yields[T] = q
 
-        cf_p1, cf_p2 = get_cf(u - 1j), get_cf(u)
-        
-        # Integration logic using raw K and S0
-        int_p1 = np.real((np.exp(-1j * u * np.log(K_mat)) * cf_p1) / (1j * u * S0 * np.exp((r_mat - q_mat) * T_mat)))
-        int_p2 = np.real((np.exp(-1j * u * np.log(K_mat)) * cf_p2) / (1j * u))
-        
-        P1 = 0.5 + (1/np.pi) * np.sum(int_p1 * du, axis=0)
-        P2 = 0.5 + (1/np.pi) * np.sum(int_p2 * du, axis=0)
-        
-        price = S0 * np.exp(-q_mat * T_mat) * P1 - K_mat * np.exp(-r_mat * T_mat) * P2
-        return np.nan_to_num(np.maximum(price.flatten(), 0.0), nan=0.0)
+            # Build the interpolator once during init
+            mats = sorted(self.yields.keys())
+            if len(mats) > 1:
+                vals = [self.yields[m] for m in mats]
+                self.interpolator = PchipInterpolator(mats, vals, extrapolate=True)
+            else:
+                self.interpolator = None
 
-# ---------------------------------------------------------
-# STABLE CALIBRATOR (NON-SCALED)
-# ---------------------------------------------------------
-class LocalHestonCalibrator:
-    def __init__(self, S0, r_curve, q_curve):
-        self.S0 = S0
-        self.r_curve = r_curve
-        self.q_curve = q_curve
+    def get_rate(self, T: float) -> float:
+            if self.interpolator:
+                # Pchip is much smoother than np.interp
+                return float(self.interpolator(T))
+            return self.yields.get(list(self.yields.keys())[0], 0.015) if self.yields else 0.015
 
-    def calibrate(self, options):
-        strikes = np.array([o.strike for o in options])
-        maturities = np.array([o.maturity for o in options])
-        market_prices = np.array([o.market_price for o in options])
-        r_vec = np.array([self.r_curve.get_rate(t) for t in maturities])
-        q_vec = np.array([self.q_curve.get_rate(t) for t in maturities])
-        
-        # Volatility parameters remain scale-invariant
-        bounds = [(1e-4, 0.5), (0.1, 8.0), (1e-4, 0.5), (0.01, 2.0), (-0.95, 0.0)]
-        x0 = [0.04, 2.0, 0.04, 0.4, -0.7]
+# =================================================================
+# 2. UPDATED MAIN EXECUTION
+# =================================================================
+def print_curves(r_curve, q_curve):
+    print("\n" + "="*60)
+    print(f"{'Tenor':<10} | {'Risk-Free (r)':<15} | {'Div Yield (q)':<15}")
+    print("-" * 60)
+    tenors = [(1/12, "1 Month"), (0.25, "3 Month"), (0.5, "6 Month"), (1.0, "1 Year"), (2.0, "2 Year")]
+    for t, label in tenors:
+        print(f"{label:<10} | {r_curve.get_rate(t)*100:>13.4f}% | {q_curve.get_rate(t)*100:>13.4f}%")
+    print("="*60 + "\n")
 
-        def objective(p):
-            v0, kappa, theta, xi, rho = p
-            try:
-                model_p = HestonAnalyticalPricer.price_european_call_vectorized(
-                    self.S0, strikes, maturities, r_vec, q_vec, kappa, theta, xi, rho, v0
-                )
-                return np.mean((model_p - market_prices)**2) # MSE
-            except:
-                return 1e12 # Penalty for large index points
-
-        def callback(xk):
-            mse = objective(xk)
-            print(f"   [Step] RMSE: {np.sqrt(mse):.6f} pts | v0:{xk[0]:.4f} k:{xk[1]:.2f} th:{xk[2]:.4f} xi:{xk[3]:.3f} rho:{xk[4]:.2f}")
-
-        res = minimize(objective, x0, method='L-BFGS-B', bounds=bounds, callback=callback, 
-                       tol=1e-9, options={'eps': 1e-3, 'maxiter':500})
-        
-        return {**dict(zip(['v0', 'kappa', 'theta', 'xi', 'rho'], res.x)), "rmse": np.sqrt(res.fun)}
-
-# ---------------------------------------------------------
-# MAIN LIVE EXECUTION (NON-SCALED)
-# ---------------------------------------------------------
 def main():
     FRED_API_KEY = os.getenv("FRED_API_KEY")
     target_date = datetime.now().strftime("%Y-%m-%d")
+    ticker = "^SPX"
+
+    print(f"Initializing Robust Heston Calibration for {ticker}...")
     
-    print(f"Initializing Live Feed (Raw Units) for {target_date}...")
-    
-    # 1. Fetch Yield Curves and Spot
+    # 1. Fetch Yields and Spot
     r_curve = fetch_treasury_rates_fred(target_date, FRED_API_KEY)
-    S0_actual = get_market_implied_spot("^SPX", r_curve)
+    S0_actual = get_market_implied_spot(ticker, r_curve)
     
-    # 2. Fetch Dividends and Raw Options
-    raw_df = fetch_raw_data("^SPX")
+    # 2. Robust Dividend Curve via Regression
+    print("Building Robust Dividend Surface...")
+    raw_df = fetch_raw_data(ticker)
     q_curve = ImpliedDividendCurve(raw_df, S0_actual, r_curve)
+    print_curves(r_curve, q_curve)
     
-    options_raw = fetch_options("^SPX", S0_actual, target_size=200)
+    # 3. Fetch Options for Calibration
+    options_raw = fetch_options(ticker, S0_actual, target_size=250)
+    
     options_processed = []
+    print("Converting Surface to Synthetic Calls (using Robust q)...")
     
-    # 3. Process Puts -> Calls using Raw Prices
     for opt in options_raw:
         r_T = r_curve.get_rate(opt.maturity)
         q_T = q_curve.get_rate(opt.maturity)
         
-        # Working with raw prices, no scaling division
-        k = opt.strike
-        p = opt.market_price
-        
+        # Standardize everything to Call Prices
         if opt.option_type == "PUT":
-            # Synthetic Call = Put + S0*exp(-qT) - K*exp(-rT)
-            p += (S0_actual * np.exp(-q_T * opt.maturity) - k * np.exp(-r_T * opt.maturity))
+            # Call = Put + S0*exp(-qT) - K*exp(-rT)
+            price = opt.market_price + (S0_actual * np.exp(-q_T * opt.maturity) - 
+                                        opt.strike * np.exp(-r_T * opt.maturity))
+            opt.market_price = price
             opt.option_type = "CALL"
         
-        opt.strike, opt.market_price = k, p
         options_processed.append(opt)
 
-    print(f"\nMarket Spot: {S0_actual:.2f}")
-    print(f"Ready to calibrate on {len(options_processed)} options.")
+    print(f"Calibration starting on {len(options_processed)} options. S0: {S0_actual:.2f}")
 
-    # 4. Calibration using the actual Market Spot
-    calibrator = LocalHestonCalibrator(S0=S0_actual, r_curve=r_curve, q_curve=q_curve)
+    # 4. Calibration 
+    # NOTE: Ensure your HestonCalibrator uses the Vectorized Albrecher pricer internally
+    calibrator = HestonCalibrator(S0=S0_actual, r_curve=r_curve, q_curve=q_curve)
+    
+    # Suggesting differential_evolution for global search of rho/xi
     res = calibrator.calibrate(options_processed)
     
-    # 5. Output Results
+    # 5. Output
     print("\n" + "*"*20 + " CALIBRATION COMPLETE " + "*"*20)
     for p in ['v0', 'kappa', 'theta', 'xi', 'rho']:
         print(f"  {p:<10}: {res[p]:.6f}")

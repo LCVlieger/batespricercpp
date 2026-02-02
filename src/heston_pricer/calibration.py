@@ -21,31 +21,89 @@ def implied_volatility(price, S, K, T, r, q, option_type="CALL"):
     try: return brentq(bs_price, 0.001, 5.0)
     except: return 0.0
 
-class HestonCalibrator:
-    def __init__(self, S0: float, r_curve, q_curve):
-        self.S0, self.r_curve, self.q_curve = S0, r_curve, q_curve
+import numpy as np
+from scipy.optimize import minimize
+from heston_pricer.analytics import HestonAnalyticalPricer
 
-    def calibrate(self, options: List, init_guess: List[float] = None) -> Dict:
-        strikes, maturities = np.array([o.strike for o in options]), np.array([o.maturity for o in options])
+class HestonCalibrator:
+    """
+    Calibrates Heston model parameters to market option prices using 
+    L-BFGS-B optimization on Mean Squared Error (MSE).
+    """
+    
+    def __init__(self, S0, r_curve, q_curve):
+        """
+        Parameters:
+        -----------
+        S0 : float
+            Underlying Spot Price.
+        r_curve : object
+            Yield curve object with a .get_rate(T) method.
+        q_curve : object
+            Dividend curve object with a .get_rate(T) method.
+        """
+        self.S0 = S0
+        self.r_curve = r_curve
+        self.q_curve = q_curve
+
+    def calibrate(self, options):
+        """
+        Run the calibration routine.
+
+        Parameters:
+        -----------
+        options : list
+            List of option objects (must have .strike, .maturity, .market_price).
+
+        Returns:
+        --------
+        dict
+            Dictionary containing calibrated parameters and final RMSE.
+        """
+        strikes = np.array([o.strike for o in options])
+        maturities = np.array([o.maturity for o in options])
         market_prices = np.array([o.market_price for o in options])
+        
+        # Vectorize rate retrieval
         r_vec = np.array([self.r_curve.get_rate(t) for t in maturities])
         q_vec = np.array([self.q_curve.get_rate(t) for t in maturities])
         
-        bounds = [(0.001, 0.5), (0.1, 5.0), (0.001, 0.5), (0.01, 2.0), (-0.99, 0.0)]
-        x0 = init_guess if init_guess else [0.04, 2.5, 0.04, 0.5, -0.7]
+        # Bounds: v0, kappa, theta, xi, rho
+        # Note: Rho is bounded [-0.95, 0.0] for stability in equity markets
+        bounds = [(1e-4, 0.5), (0.1, 8.0), (1e-4, 0.5), (0.01, 2.0), (-0.95, 0.0)]
+        x0 = [0.04, 2.0, 0.04, 0.4, -0.7]
 
         def objective(p):
+            v0, kappa, theta, xi, rho = p
             try:
-                model_p = HestonAnalyticalPricer.price_european_call_vectorized(self.S0, strikes, maturities, r_vec, q_vec, *p)
-                return np.mean((model_p - market_prices)**2)
-            except: return 1e9
+                model_p = HestonAnalyticalPricer.price_european_call_vectorized(
+                    self.S0, strikes, maturities, r_vec, q_vec, kappa, theta, xi, rho, v0
+                )
+                # Optimize Mean Squared Error (MSE) for smoother gradient
+                return np.mean((model_p - market_prices)**2) 
+            except Exception:
+                return 1e12 # Penalty for large index points failure
 
         def callback(xk):
-             print(f"   [Iter] RMSE: {np.sqrt(objective(xk)):.4f} | v0={xk[0]:.4f} k={xk[1]:.2f} th={xk[2]:.4f} xi={xk[3]:.4f} rho={xk[4]:.2f}")
+            mse = objective(xk)
+            print(f"   [Step] RMSE: {np.sqrt(mse):.6f} pts | v0:{xk[0]:.4f} k:{xk[1]:.2f} th:{xk[2]:.4f} xi:{xk[3]:.3f} rho:{xk[4]:.2f}")
 
-        res = minimize(objective, x0, method='SLSQP', bounds=bounds, callback=callback, tol=1e-9, options={'eps':1e-3})
-        return {**dict(zip(['v0', 'kappa', 'theta', 'xi', 'rho'], res.x)), "rmse": np.sqrt(res.fun), "success": res.success}
-
+        # Switched to L-BFGS-B for better handling of parameter bounds and gradients
+        res = minimize(
+            objective, 
+            x0, 
+            method='L-BFGS-B', 
+            bounds=bounds, 
+            callback=callback, 
+            tol=1e-9, 
+            options={'eps': 1e-3, 'maxiter': 500}
+        )
+        
+        return {
+            **dict(zip(['v0', 'kappa', 'theta', 'xi', 'rho'], res.x)), 
+            "rmse": np.sqrt(res.fun)
+        }
+    
 class HestonCalibratorMC:
     def __init__(self, S0, r_curve, q_curve, n_paths=30000, n_steps=100):
         self.S0, self.r_curve, self.q_curve = S0, r_curve, q_curve

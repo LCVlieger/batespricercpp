@@ -1,12 +1,10 @@
-import yfinance as yf
-import pandas as pd
 import numpy as np
+import pandas as pd
 import requests
-import os
+import yfinance as yf
 from datetime import datetime, timedelta
-from typing import List, Tuple, Dict
 from dataclasses import dataclass
-from scipy.interpolate import interp1d
+from typing import List
 from nelson_siegel_svensson.calibrate import calibrate_nss_ols
 
 @dataclass
@@ -94,7 +92,6 @@ def fetch_raw_data(ticker_symbol: str) -> pd.DataFrame:
     today, all_rows = datetime.now(), []
     
     # SCAN DEPTH: Increased to 120 to catch 1Y and 2Y monthly/quarterly contracts
-    # SPX has daily/weekly expiries; short ranges fail to build a curve.
     exp_list = ticker.options
     limit = min(len(exp_list), 120)
     
@@ -124,11 +121,16 @@ def fetch_raw_data(ticker_symbol: str) -> pd.DataFrame:
     return full
 
 def fetch_options(ticker_symbol: str, S0: float, target_size: int = 300) -> List[MarketOption]:
-    """Hybrid OTM Filter: Fetches liquid OTM options across the whole term structure."""
+    """Hybrid OTM Filter: Fetches liquid OTM options within a stable moneyness window."""
     ticker = yf.Ticker(ticker_symbol)
     today, candidates = datetime.now(), []
     exp_list = ticker.options
     limit = min(len(exp_list), 100)
+
+    # Define Moneyness Bounds (e.g., 0.85 to 1.15)
+    # This prevents the model from hitting rho boundaries trying to fit extreme wings.
+    lower_k = S0 * 0.85
+    upper_k = S0 * 1.15
 
     for exp_str in exp_list[:limit]:
         try:
@@ -136,16 +138,23 @@ def fetch_options(ticker_symbol: str, S0: float, target_size: int = 300) -> List
             if not (0.04 <= T <= 2.2): continue
             chain = ticker.option_chain(exp_str)
             
-            # OTM Puts and Calls
-            for opt_type, data, filter_func in [('PUT', chain.puts, lambda k: k < S0), ('CALL', chain.calls, lambda k: k > S0)]:
+            for opt_type, data, filter_func in [
+                ('PUT', chain.puts, lambda k: (k < S0) & (k >= lower_k)), 
+                ('CALL', chain.calls, lambda k: (k > S0) & (k <= upper_k))
+            ]:
+                # Apply the combined OTM + Moneyness filter
                 otm = data[filter_func(data['strike'])].copy()
+                
                 for _, row in otm.iterrows():
                     mid = (row['bid'] + row['ask']) / 2
+                    # Liquidity check (bid > 0.05% of spot)
                     if row['bid'] > S0 * 0.0005:
-                        candidates.append(MarketOption(row['strike'], T, mid, opt_type, row['bid'], row['ask']))
+                        candidates.append(MarketOption(
+                            row['strike'], T, mid, opt_type, row['bid'], row['ask']
+                        ))
         except: continue
     
-    # Deterministic sampling to spread across maturities
+    # Deterministic sampling
     if len(candidates) > target_size:
         indices = np.linspace(0, len(candidates)-1, target_size, dtype=int)
         candidates = [candidates[i] for i in indices]
@@ -155,6 +164,8 @@ def get_market_implied_spot(ticker_symbol: str, r_curve) -> float:
     ticker = yf.Ticker(ticker_symbol)
     try: S_anchor = ticker.fast_info['last_price']
     except: return 0.0
+    
+    # Use near-term options to refine Spot via Put-Call Parity
     for exp_str in ticker.options[:3]:
         try:
             T = (datetime.strptime(exp_str, "%Y-%m-%d") - datetime.now()).days / 365.25
@@ -164,6 +175,7 @@ def get_market_implied_spot(ticker_symbol: str, r_curve) -> float:
             atm = merged[(merged.strike > S_anchor*0.98) & (merged.strike < S_anchor*1.02)]
             if atm.empty: continue
             r = r_curve.get_rate(T)
+            # S = C - P + K*exp(-rT)
             return (atm.C - atm.P + atm.strike * np.exp(-r*T)).median()
         except: continue
     return S_anchor
