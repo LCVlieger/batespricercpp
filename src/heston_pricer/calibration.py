@@ -31,8 +31,8 @@ class HestonCalibrator:
         r_vec = np.array([self.r_curve.get_rate(t) for t in maturities])
         q_vec = np.array([self.q_curve.get_rate(t) for t in maturities])
         
-        bounds = [(0.001, 0.5), (0.1, 10.0), (0.001, 0.5), (0.01, 2.0), (-0.99, 0.0)]
-        x0 = init_guess if init_guess else [0.04, 2.0, 0.04, 0.5, -0.7]
+        bounds = [(0.001, 0.5), (0.1, 5.0), (0.001, 0.5), (0.01, 2.0), (-0.99, 0.0)]
+        x0 = init_guess if init_guess else [0.04, 2.5, 0.04, 0.5, -0.7]
 
         def objective(p):
             try:
@@ -43,7 +43,7 @@ class HestonCalibrator:
         def callback(xk):
              print(f"   [Iter] RMSE: {np.sqrt(objective(xk)):.4f} | v0={xk[0]:.4f} k={xk[1]:.2f} th={xk[2]:.4f} xi={xk[3]:.4f} rho={xk[4]:.2f}")
 
-        res = minimize(objective, x0, method='L-BFGS-B', bounds=bounds, callback=callback, tol=1e-8, options={'eps':1e-3})
+        res = minimize(objective, x0, method='SLSQP', bounds=bounds, callback=callback, tol=1e-9, options={'eps':1e-3})
         return {**dict(zip(['v0', 'kappa', 'theta', 'xi', 'rho'], res.x)), "rmse": np.sqrt(res.fun), "success": res.success}
 
 class HestonCalibratorMC:
@@ -94,7 +94,7 @@ class HestonCalibratorMC:
         bounds = [(0.1, 10.0), (0.001, 2.0), (0.01, 5.0), (-0.999, 0.0), (0.001, 2.0)]
         def callback(xk):
              print(f"   [MonteCarlo] k={xk[0]:.2f}, theta={xk[1]:.3f}, xi={xk[2]:.2f}, rho={xk[3]:.2f}, v0={xk[4]:.3f}", flush=True)
-        result = minimize(self.objective, x0, method='L-BFGS-B', bounds=bounds, callback=callback, tol=1e-5)
+        result = minimize(self.objective, x0, method='L-BFGS-B', bounds=bounds, callback=callback, tol=1e-8, options={'eps':1e-2})
         final_map = self.get_prices(result.x)
         sse_iv, count = 0.0, 0
         for T, opts in self.maturity_batches.items():
