@@ -13,7 +13,7 @@ from typing import List
 try:
     from heston_pricer.calibration import HestonCalibrator, HestonCalibratorMC, implied_volatility, SimpleYieldCurve
     from heston_pricer.analytics import HestonAnalyticalPricer
-    from heston_pricer.data import fetch_options
+    from heston_pricer.data import fetch_options, get_market_implied_spot
     from heston_pricer.instruments import EuropeanOption, OptionType
 except ImportError:
     raise ImportError("heston_pricer package not found. Ensure PYTHONPATH is set correctly.")
@@ -61,54 +61,87 @@ def fetch_dynamic_risk_free_curve():
 
 # -----------------------------
 # IMPLIED DIVIDEND CURVE
-# -----------------------------
-def extract_implied_dividends(ticker_symbol, S0, r_curve):
-    log(f"Extracting implied dividends for {ticker_symbol}...")
-    is_index = ticker_symbol.startswith("^")
-    
-    if not is_index:
-        return _calculate_historical_yield(ticker_symbol, S0)
+
+def extract_implied_dividends(ticker_symbol: str, S0: float, r_curve: SimpleYieldCurve) -> SimpleYieldCurve:
+    """
+    Extracts the Term Structure of Dividend Yields (q) from Market Options.
+    Uses Put-Call Parity: C - P = S0 * exp(-qT) - K * exp(-rT)
+    Solved for q: q = -ln( (C - P + K*exp(-rT)) / S0 ) / T
+    """
+    log(f"Extracting implied dividend term structure for {ticker_symbol}...")
     
     ticker = yf.Ticker(ticker_symbol)
     expirations = ticker.options
     today = datetime.now()
-    candidates = []
+    
+    tenors = []
+    q_rates = []
 
+    # Iterate through maturities to build the curve
     for exp_str in expirations:
         try:
             d = datetime.strptime(exp_str, "%Y-%m-%d")
             T = (d - today).days / 365.25
-            if not (0.05 <= T <= 3.0):
-                continue
-
-            r = r_curve.get_rate(T)
-            chain = ticker.option_chain(exp_str)
-            calls = {row['strike']: (row['bid'] + row['ask'])/2 for _, row in chain.calls.iterrows() if row['bid'] > 0}
-            puts = {row['strike']: (row['bid'] + row['ask'])/2 for _, row in chain.puts.iterrows() if row['bid'] > 0}
-            common_strikes = set(calls.keys()).intersection(set(puts.keys()))
             
-            implied_qs = []
-            for K in common_strikes:
-                if 0.95 <= K/S0 <= 1.05:
-                    C, P = calls[K], puts[K]
-                    lhs = (C - P + K * np.exp(-r*T)) / S0
-                    if lhs > 0:
-                        q_val = -np.log(lhs)/T
-                        if -0.02 < q_val < 0.10:
-                            implied_qs.append(q_val)
-            if implied_qs:
-                candidates.append({'T': T, 'q_raw': np.mean(implied_qs)})
+            # Filter: Ignore very short (noise) and very long (illiquid)
+            if not (0.05 <= T <= 2.5): continue
+
+            # Get Rates
+            r = r_curve.get_rate(T)
+            discount_r = np.exp(-r * T)
+            
+            # Fetch Chain
+            chain = ticker.option_chain(exp_str)
+            
+            # Prepare Dataframes
+            calls = chain.calls[['strike', 'bid', 'ask']].copy()
+            puts = chain.puts[['strike', 'bid', 'ask']].copy()
+            calls['mid'] = (calls['bid'] + calls['ask']) / 2
+            puts['mid'] = (puts['bid'] + puts['ask']) / 2
+            
+            # Find ATM Overlap (Intersection)
+            merged = pd.merge(calls, puts, on='strike', suffixes=('_c', '_p'))
+            
+            # Filter for ATM ONLY (Moneyness 0.98 - 1.02)
+            # We only trust the dividend signal from liquid ATM options
+            atm = merged[
+                (merged['strike'] > S0 * 0.98) & 
+                (merged['strike'] < S0 * 1.02)
+            ].copy()
+            
+            if atm.empty: continue
+            
+            # Solve for q for each ATM pair
+            # LHS = exp(-qT) = (C - P + K*exp(-rT)) / S0
+            atm.loc[:,'parity_balance'] = (atm['mid_c'] - atm['mid_p'] + atm['strike'] * discount_r) / S0
+            
+            # Filter invalid logs (arbitrage violations)
+            valid = atm[atm['parity_balance'] > 0].copy()
+            if valid.empty: continue
+            
+            valid['q_implied'] = -np.log(valid['parity_balance']) / T
+            
+            # Take the median q for this maturity (robust to outliers)
+            avg_q = valid['q_implied'].median()
+            
+            # Sanity check: Dividends shouldn't be -50% or +50%
+            if -0.05 < avg_q < 0.15:
+                tenors.append(T)
+                q_rates.append(avg_q)
+
         except Exception:
             continue
+            
+    if not tenors:
+        log("! Warning: Could not extract implied dividends. Defaulting to 1.1%.")
+        return SimpleYieldCurve([0.0, 30.0], [0.011, 0.011])
+        
+    log(f"-> Derived q-curve with {len(tenors)} points (Avg: {np.mean(q_rates):.2%})")
+    
+    # Sort by time
+    sorted_pairs = sorted(zip(tenors, q_rates))
+    return SimpleYieldCurve([t for t, _ in sorted_pairs], [q for _, q in sorted_pairs])
 
-    if not candidates:
-        return _calculate_historical_yield(ticker_symbol, S0)
-
-    candidates.sort(key=lambda x: x['T'])
-    tenors = [c['T'] for c in candidates]
-    rates = [c['q_raw'] for c in candidates]
-    log(f"Generated term-structured dividend curve with {len(tenors)} tenors.")
-    return SimpleYieldCurve(tenors, rates)
 
 def _calculate_historical_yield(ticker_symbol, S0):
     try:
@@ -172,7 +205,7 @@ def save_results(ticker, S0, r_curve, q_curve, res_ana, res_mc, options, init_gu
 
     df = pd.DataFrame(rows)
     print(df[["Type", "T", "K", "Mkt", "Ana", "Err_A", "IV_Mkt"]].to_string(index=False))
-    df.to_csv(f"{base_name}_prices.csv", index=False)
+    #df.to_csv(f"{base_name}_prices.csv", index=False)
     log(f"Saved results to {base_name}_prices.csv")
 
 def clear_numba_cache():
@@ -185,20 +218,46 @@ def clear_numba_cache():
 # MAIN
 # -----------------------------
 def main():
-    clear_numba_cache()
-    os.makedirs("results", exist_ok=True)
+    ticker_symbol = "^SPX"
     
-    ticker = "^SPX" 
-    options_raw, S0_raw = fetch_options(ticker)
-    if not options_raw:
-        log(f"No liquidity for {ticker}")
+    # 1. Get the Raw Anchor (Downloaded) Spot first for comparison
+    ticker = yf.Ticker(ticker_symbol)
+    try:
+        S0_downloaded = ticker.fast_info.get('last_price') or ticker.history(period="1d")['Close'].iloc[-1]
+    except:
+        log("! Critical: Could not fetch any price data.")
         return
 
-    # --- SCALING LOGIC ---
-    #log(f"Scaling market data by 1/{S0_raw:.2f} for calibration...")
-    S0_scaled = 1 #S0_raw
-    options_scaled = []
+    r_curve = fetch_dynamic_risk_free_curve()
+    # 2. Get the Market-Implied Spot (The "Truth" from Put-Call Parity)
+    S0_implied = get_market_implied_spot(ticker_symbol, r_curve)
     
+    # 3. Print the Comparison
+    # This will show you the exact "gap" that was causing your calibration errors
+    diff = S0_implied - S0_downloaded
+    log("="*50)
+    log(f"SPOT PRICE COMPARISON for {ticker_symbol}")
+    log(f"-> Downloaded Spot: {S0_downloaded:10.2f}")
+    log(f"-> Implied Spot:    {S0_implied:10.2f}")
+    log(f"-> Basis (Gap):     {diff:10.2f} ({diff/S0_downloaded:.4%})")
+    log("="*50)
+
+    # 4. Fetch purely OTM options using the Implied Spot as the center
+    # This ensures your Call/Put split is perfectly aligned with the market
+    options_raw = fetch_options(ticker_symbol, S0_implied, target_size=300)
+    
+    if not options_raw:
+        log("No liquidity found for calibration.")
+        return
+
+    # 5. Proceed with Curves and Scaling
+    q_curve = extract_implied_dividends(ticker_symbol, S0_implied, r_curve) #SimpleYieldCurve([0.0, 30.0], [0.011, 0.011])
+    print_curve("Dividend (q)", q_curve)
+    # We scale using the Implied Spot (our new "1.0")
+    S0_raw = S0_implied 
+    S0_scaled = 1.0
+    options_scaled = []
+
     for opt in options_raw:
         scaled_opt = copy.copy(opt)
         try:
@@ -215,9 +274,7 @@ def main():
     
     log(f"Target: {ticker} (Original S0={S0_raw:.2f}, Scaled S0=1.0) | N={len(options_scaled)}")
     
-    r_curve = fetch_dynamic_risk_free_curve()
-    q_curve = SimpleYieldCurve([0.0, 30.0], [0.11, 0.11])
-
+    
     # 1. ANALYTICAL CALIBRATION
     cal_ana = HestonCalibrator(S0_scaled, r_curve=r_curve, q_curve=q_curve)
     init_guess = [2.0, 0.025, 0.1, -0.5, 0.015] 
@@ -258,7 +315,46 @@ def main():
     print("\nParameter Comparison:")
     print(df_params.to_string(float_format="{:.4f}".format))
     
-    #save_results(ticker, S0_raw, r_curve, q_curve, res_ana, res_mc, options_raw, init_guess)
+    save_results(ticker_symbol, S0_raw, r_curve, q_curve, res_ana, res_mc, options_raw, init_guess)
+
+def print_curve(name, curve):
+    print(f"\n--- {name} Curve ---")
+    print(f"{'Tenor (T)':<12} | {'Rate (%)':<10}")
+    print("-" * 25)
+    # Most curve implementations have .tenors and .rates or .times and .values
+    # Adjust the attribute names based on your SimpleYieldCurve definition
+    for t, r in zip(curve.tenors, curve.rates):
+        print(f"{t:<12.4f} | {r*100:<10.2f}%")
+
+
+def get_implied_spot(options, r_curve, q_curve):
+    # Filter for the shortest maturity available
+    min_T = min(o.maturity for o in options)
+    short_opts = [o for o in options if o.maturity == min_T]
+    
+    # Find overlapping strikes
+    calls = {o.strike: o.market_price for o in short_opts if o.option_type == "CALL"}
+    puts = {o.strike: o.market_price for o in short_opts if o.option_type == "PUT"}
+    
+    common_strikes = set(calls.keys()).intersection(set(puts.keys()))
+    if not common_strikes:
+        return None
+        
+    # Calculate Implied Spot for each pair: S = (C - P + K*exp(-rT)) / exp(-qT)
+    r = r_curve.get_rate(min_T)
+    q = q_curve.get_rate(min_T)
+    spots = []
+    
+    for K in common_strikes:
+        C = calls[K]
+        P = puts[K]
+        S_imp = (C - P + K * np.exp(-r * min_T)) / np.exp(-q * min_T)
+        spots.append(S_imp)
+        
+    return np.mean(spots)
+
+
 
 if __name__ == "__main__":
     main()
+
