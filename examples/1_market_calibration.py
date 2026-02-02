@@ -2,6 +2,7 @@ import time
 import json
 import os
 import shutil
+import copy
 import numpy as np
 import pandas as pd
 import yfinance as yf
@@ -16,6 +17,9 @@ try:
     from heston_pricer.instruments import EuropeanOption, OptionType
 except ImportError:
     raise ImportError("heston_pricer package not found. Ensure PYTHONPATH is set correctly.")
+
+# --- CONFIGURATION ---
+RUN_MC = False  # <--- SET TO FALSE TO DISABLE SLOW MC CALIBRATION
 
 def log(msg):
     print(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}")
@@ -56,13 +60,9 @@ def fetch_dynamic_risk_free_curve():
         return SimpleYieldCurve([0.1, 3.0], [0.042, 0.042])
 
 # -----------------------------
-# IMPLIED DIVIDEND CURVE (TERM-STRUCTURED)
+# IMPLIED DIVIDEND CURVE
 # -----------------------------
 def extract_implied_dividends(ticker_symbol, S0, r_curve):
-    """
-    Extracts maturity-dependent implied dividends for indices (^SPX) 
-    using Put-Call Parity. Returns a non-flattened yield curve.
-    """
     log(f"Extracting implied dividends for {ticker_symbol}...")
     is_index = ticker_symbol.startswith("^")
     
@@ -116,15 +116,13 @@ def _calculate_historical_yield(ticker_symbol, S0):
         ticker = yf.Ticker(ticker_symbol)
         divs = ticker.dividends
         if divs.empty:
-            log("-> No dividend history found. Assuming 0%.")
             return SimpleYieldCurve([0.1, 5.0], [0.0, 0.0])
         one_year_ago = pd.Timestamp.now(tz=divs.index.tz) - pd.Timedelta(days=365)
         recent_divs = divs[divs.index >= one_year_ago]
         total_payout = recent_divs.sum()
         q = total_payout / S0
         log(f"-> Calculated yield: {q:.4%}")
-    except Exception as e:
-        log(f"-> Calculation failed ({e}). Defaulting to 0%.")
+    except Exception:
         q = 0.0
     return SimpleYieldCurve([0.1, 5.0], [q, q])
 
@@ -137,15 +135,8 @@ def save_results(ticker, S0, r_curve, q_curve, res_ana, res_mc, options, init_gu
     
     with open(f"{base_name}_meta.json", "w") as f: 
         json.dump({
-            "market": {
-                "S0": S0, 
-                "r": r_curve.to_dict(), 
-                "q": q_curve.to_dict()
-            }, 
-            "initial_guess": {
-                "kappa": init_guess[0], "theta": init_guess[1],
-                "xi": init_guess[2], "rho": init_guess[3], "v0": init_guess[4]
-            },
+            "market": { "S0": S0, "r": r_curve.to_dict(), "q": q_curve.to_dict() }, 
+            "initial_guess": { "kappa": init_guess[0], "theta": init_guess[1], "xi": init_guess[2], "rho": init_guess[3], "v0": init_guess[4] },
             "analytical": res_ana, 
             "monte_carlo_results": res_mc 
         }, f, indent=4)
@@ -153,13 +144,14 @@ def save_results(ticker, S0, r_curve, q_curve, res_ana, res_mc, options, init_gu
     get_params = lambda res: [res.get(k, 0) for k in ['kappa', 'theta', 'xi', 'rho', 'v0']]
     rows = []
 
-    print(f"\n[Validation] Re-pricing {len(options)} instruments...")
+    print(f"\n[Validation] Re-pricing {len(options)} instruments (Unscaled)...")
 
     for opt in options:
         is_put = (opt.option_type == "PUT")
         r_T = r_curve.get_rate(opt.maturity)
         q_T = q_curve.get_rate(opt.maturity)
         
+        # We still use the robust single-pricer here for final validation output
         def price_with_params(params):
             if is_put:
                 return HestonAnalyticalPricer.price_european_put(S0, opt.strike, opt.maturity, r_T, q_T, *params)
@@ -167,6 +159,7 @@ def save_results(ticker, S0, r_curve, q_curve, res_ana, res_mc, options, init_gu
                 return HestonAnalyticalPricer.price_european_call(S0, opt.strike, opt.maturity, r_T, q_T, *params)
 
         p_ana = price_with_params(get_params(res_ana))
+        # If MC didn't run, p_mc will just reuse Analytical params
         p_mc = price_with_params(get_params(res_mc))
         iv_mkt = implied_volatility(opt.market_price, S0, opt.strike, opt.maturity, r_T, q_T, opt.option_type)
 
@@ -174,18 +167,14 @@ def save_results(ticker, S0, r_curve, q_curve, res_ana, res_mc, options, init_gu
             "Type": opt.option_type, "T": round(opt.maturity, 3), "K": opt.strike, "Mkt": opt.market_price, 
             "Ana": round(p_ana, 2), "Err_A": round(p_ana - opt.market_price, 2),
             "MC": round(p_mc, 2), "Err_MC": round(p_mc - opt.market_price, 2),
-            "IV_Mkt": round(iv_mkt, 4), "r_used": round(r_T, 4), "q_used": round(q_T, 4)
+            "IV_Mkt": round(iv_mkt, 4)
         })
 
     df = pd.DataFrame(rows)
-    # Printed table now explicitly includes r_used and q_used
-    print(df[["Type", "T", "K", "Mkt", "Ana", "Err_A", "r_used", "q_used"]].to_string(index=False))
+    print(df[["Type", "T", "K", "Mkt", "Ana", "Err_A", "IV_Mkt"]].to_string(index=False))
     df.to_csv(f"{base_name}_prices.csv", index=False)
     log(f"Saved results to {base_name}_prices.csv")
 
-# -----------------------------
-# UTILITY: CLEAR CACHE
-# -----------------------------
 def clear_numba_cache():
     for root, dirs, files in os.walk("src"):
         for d in dirs:
@@ -200,41 +189,65 @@ def main():
     os.makedirs("results", exist_ok=True)
     
     ticker = "^SPX" 
-    options, S0 = fetch_options(ticker)
-    if not options:
+    options_raw, S0_raw = fetch_options(ticker)
+    if not options_raw:
         log(f"No liquidity for {ticker}")
         return
 
-    options.sort(key=lambda x: (x.maturity, x.strike))
-    log(f"Target: {ticker} (S0={S0:.2f}) | N={len(options)}")
+    # --- SCALING LOGIC ---
+    #log(f"Scaling market data by 1/{S0_raw:.2f} for calibration...")
+    S0_scaled = 1 #S0_raw
+    options_scaled = []
+    
+    for opt in options_raw:
+        scaled_opt = copy.copy(opt)
+        try:
+            scaled_opt.strike = opt.strike / S0_raw
+            scaled_opt.market_price = opt.market_price / S0_raw
+        except AttributeError:
+            scaled_opt = EuropeanOption(
+                opt.strike / S0_raw, opt.maturity, opt.option_type, opt.market_price / S0_raw
+            )
+        options_scaled.append(scaled_opt)
+        
+    options_scaled.sort(key=lambda x: (x.maturity, x.strike))
+    options_raw.sort(key=lambda x: (x.maturity, x.strike))
+    
+    log(f"Target: {ticker} (Original S0={S0_raw:.2f}, Scaled S0=1.0) | N={len(options_scaled)}")
     
     r_curve = fetch_dynamic_risk_free_curve()
-    q_curve = extract_implied_dividends(ticker, S0, r_curve)
+    q_curve = SimpleYieldCurve([0.0, 30.0], [0.11, 0.11])
 
-    cal_ana = HestonCalibrator(S0, r_curve=r_curve, q_curve=q_curve)
-    
-    max_maturity = options[-1].maturity if options else 1.0
-    n_steps_mc = max(int(max_maturity * 252), 50)
-    
-    log(f"Monte Carlo Config: 30,000 Paths | {n_steps_mc} Steps (Daily Resolution)")
-    cal_mc = HestonCalibratorMC(S0, r_curve=r_curve, q_curve=q_curve, n_paths=30_000, n_steps=n_steps_mc)
-    
+    # 1. ANALYTICAL CALIBRATION
+    cal_ana = HestonCalibrator(S0_scaled, r_curve=r_curve, q_curve=q_curve)
     init_guess = [2.0, 0.025, 0.1, -0.5, 0.015] 
 
     t0 = time.time()    
-    res_ana = cal_ana.calibrate(options, init_guess)
-    avg_mkt_price = np.mean([o.market_price for o in options])
-    rmse_p_ana = np.sqrt(res_ana['fun'] / len(options))
-    log(f"Analytical: rmse={rmse_p_ana:.4f} ({rmse_p_ana/avg_mkt_price:.2%}) , IV-rmse={res_ana['rmse_iv']:.4f} ({res_ana['rmse_iv']:.2%}) ({time.time()-t0:.2f}s)") 
+    res_ana = cal_ana.calibrate(options_scaled, init_guess)
     
-    t1 = time.time()
-    try:
-        res_mc = cal_mc.calibrate(options, init_guess)
-        rmse_p_mc = np.sqrt(res_mc['fun'] / len(options)) 
-        log(f"MonteCarlo: rmse={rmse_p_mc:.4f} ({rmse_p_mc/avg_mkt_price:.2%}) , IV-rmse={res_mc['rmse_iv']:.4f} ({res_mc['rmse_iv']:.2%}) ({time.time()-t1:.2f}s)")
-    except Exception as e:
-        log(f"MC Fail: {e}")
-        res_mc = res_ana 
+    # Note: 'fun' is now MSE (Price squared error), so sqrt(fun) is RMSE of Price
+    rmse_scaled = np.sqrt(res_ana['fun']) 
+    log(f"Analytical (Scaled Price RMSE): {rmse_scaled:.6f} ({time.time()-t0:.2f}s)") 
+    
+    # 2. MONTE CARLO CALIBRATION (CONDITIONAL)
+    res_mc = {}
+    if RUN_MC:
+        max_maturity = options_scaled[-1].maturity if options_scaled else 1.0
+        n_steps_mc = max(int(max_maturity * 252), 50)
+        log(f"Monte Carlo Config: 30,000 Paths | {n_steps_mc} Steps")
+        cal_mc = HestonCalibratorMC(S0_scaled, r_curve=r_curve, q_curve=q_curve, n_paths=30_000, n_steps=n_steps_mc)
+        
+        t1 = time.time()
+        try:
+            res_mc = cal_mc.calibrate(options_scaled, init_guess)
+            rmse_mc_scaled = np.sqrt(res_mc['fun']) 
+            log(f"MonteCarlo (Scaled): rmse={rmse_mc_scaled:.6f} ({time.time()-t1:.2f}s)")
+        except Exception as e:
+            log(f"MC Fail: {e}")
+            res_mc = res_ana
+    else:
+        log("Skipping Monte Carlo Calibration (RUN_MC = False)")
+        res_mc = res_ana # Use Analytical results as placeholder
 
     params = ['kappa', 'theta', 'xi', 'rho', 'v0']
     df_params = pd.DataFrame({
@@ -245,7 +258,7 @@ def main():
     print("\nParameter Comparison:")
     print(df_params.to_string(float_format="{:.4f}".format))
     
-    save_results(ticker, S0, r_curve, q_curve, res_ana, res_mc, options, init_guess)
+    #save_results(ticker, S0_raw, r_curve, q_curve, res_ana, res_mc, options_raw, init_guess)
 
 if __name__ == "__main__":
     main()
