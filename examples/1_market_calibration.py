@@ -242,7 +242,7 @@ def main():
     log(f"-> Basis (Gap):     {diff:10.2f} ({diff/S0_downloaded:.4%})")
     log("="*50)
 
-    # 4. Fetch purely OTM options using the Implied Spot as the center
+    # 4. Fetch purely OTM options using the Implied Spot as the centergi
     # This ensures your Call/Put split is perfectly aligned with the market
     options_raw = fetch_options(ticker_symbol, S0_implied, target_size=300)
     
