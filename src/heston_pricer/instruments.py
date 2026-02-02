@@ -18,6 +18,11 @@ class Option(ABC):
         pass
 
 class EuropeanOption(Option):
+    def __init__(self, strike, maturity, option_type, price=None):
+        self.strike = strike
+        self.maturity = maturity
+        self.option_type = option_type
+        self.price = price
     def payoff(self, prices: np.ndarray) -> np.ndarray:
         S_T = prices[:, -1]
         phi = self.option_type.value

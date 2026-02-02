@@ -6,3 +6,6 @@ notes.txt
 
 #plotting once the calibration has been done 
 examples/4_validation_IVsurfaceplotting.py
+
+# Exclude historical SPY data
+src/spy_2020_2022.csv

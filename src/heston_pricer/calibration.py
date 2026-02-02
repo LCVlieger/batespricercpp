@@ -85,7 +85,7 @@ class HestonCalibrator:
 
         print("Starting Vectorized Price Minimization (Albrecher Stable Form)...")
         result = minimize(
-            objective, x0, method='L-BFGS-B', bounds=bounds, callback=callback, tol=1e-9
+            objective, x0, method='SLSQP', bounds=bounds, callback=callback, tol=1e-9, options={'ftol': 1e-9, 'eps': 1e-5, 'maxiter': 1e4}
         )
 
         return {
