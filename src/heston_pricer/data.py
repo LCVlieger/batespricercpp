@@ -1,9 +1,13 @@
 import yfinance as yf
 import pandas as pd
 import numpy as np
-from datetime import datetime
-from typing import List, Tuple
+import requests
+import os
+from datetime import datetime, timedelta
+from typing import List, Tuple, Dict
 from dataclasses import dataclass
+from scipy.interpolate import interp1d
+from nelson_siegel_svensson.calibrate import calibrate_nss_ols
 
 @dataclass
 class MarketOption:
@@ -14,150 +18,152 @@ class MarketOption:
     bid: float = 0.0
     ask: float = 0.0
 
-# --- PART 2: THE CALIBRATION FETCHER (OTM ONLY) ---
-def fetch_options(ticker_symbol: str, S0: float, target_size: int = 300) -> List[MarketOption]:
-    """
-    Fetches strictly OTM options based on the provided S0.
-    """
-    ticker = yf.Ticker(ticker_symbol)
-    expirations = ticker.options
-    today = datetime.now()
+# --- PART 1: RATE ENGINE (NSS/FRED) ---
+class NSSYieldCurve:
+    def __init__(self, curve_fit):
+        self.curve = curve_fit
+    def get_rate(self, T: float) -> float:
+        return float(self.curve(max(T, 1e-4)))
+
+def fetch_treasury_rates_fred(date_str: str, api_key: str) -> NSSYieldCurve:
+    """Fetches official yields. Looks back up to 5 days to handle weekends/holidays."""
+    series_map = {
+        1/12: "DGS1MO", 3/12: "DGS3MO", 6/12: "DGS6MO", 
+        1.0: "DGS1", 2.0: "DGS2", 5.0: "DGS5", 10.0: "DGS10", 30.0: "DGS30"
+    }
     
-    all_candidates = []
-    MIN_T, MAX_T = 0.04, 1
-    PHI = 0.0005 
+    def fetch_for_date(d_str):
+        mats, yields = [], []
+        for tenor, s_id in series_map.items():
+            url = f"https://api.stlouisfed.org/fred/series/observations?series_id={s_id}&api_key={api_key}&file_type=json&observation_start={d_str}&observation_end={d_str}"
+            try:
+                res = requests.get(url, timeout=5).json()
+                val = res['observations'][0]['value']
+                if val != '.':
+                    mats.append(tenor)
+                    yields.append(float(val) / 100.0)
+            except: continue
+        return mats, yields
 
-    print(f"Scanning chains for OTM Calibration Data (Spot Reference: {S0:.2f})...")
+    target_dt = datetime.strptime(date_str, "%Y-%m-%d")
+    for i in range(6):
+        lookup_date = (target_dt - timedelta(days=i)).strftime("%Y-%m-%d")
+        maturities, yields = fetch_for_date(lookup_date)
+        if maturities:
+            curve_fit, _ = calibrate_nss_ols(np.array(maturities), np.array(yields))
+            return NSSYieldCurve(curve_fit)
+    
+    raise ValueError("Could not fetch FRED rates for the last 5 days.")
 
-    for exp_str in expirations:
+# --- PART 2: SMART DIVIDEND CURVE ---
+class ImpliedDividendCurve:
+    """Extracts implied dividend yield term structure using Put-Call Parity."""
+    def __init__(self, df: pd.DataFrame, S0: float, r_curve):
+        self.yields = {}
+        # Group by maturity and find ATM points
+        for T in sorted(df['T'].unique()):
+            if T < 0.005: continue
+            subset = df[df['T'] == T]
+            r = r_curve.get_rate(T)
+            
+            # Find row closest to ATM Forward (F = S*exp(rT))
+            F_approx = S0 * np.exp(r * T)
+            valid = subset.dropna(subset=['C_MID', 'P_MID'])
+            if valid.empty: continue
+            
+            row = valid.loc[(valid['STRIKE'] - F_approx).abs().idxmin()]
+            # Solve q: S*exp(-qT) = C - P + K*exp(-rT)
+            rhs = row['C_MID'] - row['P_MID'] + row['STRIKE'] * np.exp(-r * T)
+            
+            if rhs > 0:
+                self.yields[T] = -np.log(rhs / S0) / T
+
+    def get_rate(self, T: float) -> float:
+        mats = sorted(self.yields.keys())
+        if len(mats) > 1:
+            # Linear interpolation/extrapolation
+            return float(np.interp(T, mats, [self.yields[m] for m in mats]))
+        elif len(mats) == 1:
+            return float(self.yields[mats[0]])
+        return 0.015
+
+# --- PART 3: DATA FETCHING ---
+def fetch_raw_data(ticker_symbol: str) -> pd.DataFrame:
+    """Fetches broad options data for curve construction. Scans deep for long tenors."""
+    ticker = yf.Ticker(ticker_symbol)
+    today, all_rows = datetime.now(), []
+    
+    # SCAN DEPTH: Increased to 120 to catch 1Y and 2Y monthly/quarterly contracts
+    # SPX has daily/weekly expiries; short ranges fail to build a curve.
+    exp_list = ticker.options
+    limit = min(len(exp_list), 120)
+    
+    print(f"Scanning {limit} expirations for dividend extraction...")
+    for exp_str in exp_list[:limit]: 
         try:
-            d = datetime.strptime(exp_str, "%Y-%m-%d")
-            T = (d - today).days / 365.25
-            if not (MIN_T <= T <= MAX_T): continue
+            T = (datetime.strptime(exp_str, "%Y-%m-%d") - today).days / 365.25
+            if T < 0.005: continue
+            chain = ticker.option_chain(exp_str)
+            for opt_type, data in [('CALL', chain.calls), ('PUT', chain.puts)]:
+                for _, row in data.iterrows():
+                    all_rows.append({
+                        'T': T, 
+                        'STRIKE': round(float(row['strike']), 2),
+                        'type': opt_type, 
+                        'bid': row['bid'], 
+                        'ask': row['ask']
+                    })
+        except: continue
+    
+    df = pd.DataFrame(all_rows)
+    df_c = df[df['type']=='CALL'].drop(columns='type').rename(columns={'bid':'C_BID','ask':'C_ASK'}).set_index(['T','STRIKE'])
+    df_p = df[df['type']=='PUT'].drop(columns='type').rename(columns={'bid':'P_BID','ask':'P_ASK'}).set_index(['T','STRIKE'])
+    
+    full = df_c.join(df_p, how='inner').reset_index()
+    full['C_MID'], full['P_MID'] = (full['C_BID']+full['C_ASK'])/2, (full['P_BID']+full['P_ASK'])/2
+    return full
 
+def fetch_options(ticker_symbol: str, S0: float, target_size: int = 300) -> List[MarketOption]:
+    """Hybrid OTM Filter: Fetches liquid OTM options across the whole term structure."""
+    ticker = yf.Ticker(ticker_symbol)
+    today, candidates = datetime.now(), []
+    exp_list = ticker.options
+    limit = min(len(exp_list), 100)
+
+    for exp_str in exp_list[:limit]:
+        try:
+            T = (datetime.strptime(exp_str, "%Y-%m-%d") - today).days / 365.25
+            if not (0.04 <= T <= 2.2): continue
             chain = ticker.option_chain(exp_str)
             
-            # Process Puts
-            puts = chain.puts.copy()
-            puts['type'] = 'PUT'
-            # STRICT OTM FILTER: Strike < Spot
-            puts = puts[puts['strike'] < S0] 
-            
-            # Process Calls
-            calls = chain.calls.copy()
-            calls['type'] = 'CALL'
-            # STRICT OTM FILTER: Strike > Spot
-            calls = calls[calls['strike'] > S0]
-            
-            combined = pd.concat([puts, calls])
-            
-            for _, row in combined.iterrows():
-                K = row['strike']
-                bid = row.get('bid', 0.0)
-                ask = row.get('ask', 0.0)
-                mid = (bid + ask) / 2.0
-                
-                # Filters
-                if bid < S0 * PHI: continue # Ghost bid
-                spread = (ask - bid) / mid
-                if spread > 0.40: continue # Wide spread
-                
-                # Moneyness Filter (0.75 to 1.3)
-                if not (0.75 < K/S0 < 1.25): continue
-
-                all_candidates.append({
-                    'strike': K, 'maturity': T, 'market_price': mid,
-                    'spread_ratio': spread, 'type': row['type'],
-                    'bid': bid, 'ask': ask
-                })
+            # OTM Puts and Calls
+            for opt_type, data, filter_func in [('PUT', chain.puts, lambda k: k < S0), ('CALL', chain.calls, lambda k: k > S0)]:
+                otm = data[filter_func(data['strike'])].copy()
+                for _, row in otm.iterrows():
+                    mid = (row['bid'] + row['ask']) / 2
+                    if row['bid'] > S0 * 0.0005:
+                        candidates.append(MarketOption(row['strike'], T, mid, opt_type, row['bid'], row['ask']))
         except: continue
-
-    if not all_candidates: return []
     
-    # --- SAMPLING STRATEGY ---
-    df = pd.DataFrame(all_candidates)
-    unique_maturities = sorted(df['maturity'].unique())
-    selected_indices = set()
-    target_per_date = max(4, target_size // len(unique_maturities))
-    
-    # Use SKEW_POWER > 1.0 to prioritize ATM options (Low Skew)
-    SKEW_POWER = 2.0 
-    
-    for mat in unique_maturities:
-        mat_slice = df[df['maturity'] == mat]
-        
-        for opt_type in ['PUT', 'CALL']:
-            # Puts: Sort Ascending (Deep OTM -> ATM) -> We want end of list
-            # Calls: Sort Ascending (ATM -> Deep OTM) -> We want start of list
-            
-            candidates = mat_slice[mat_slice['type'] == opt_type].sort_values('strike')
-            count = len(candidates)
-            if count == 0: continue
-            
-            n_need = target_per_date // 2
-            
-            if count <= n_need:
-                selected_indices.update(candidates.index)
-            else:
-                u = np.linspace(0, 1, n_need)
-                if opt_type == 'CALL':
-                    # Calls start at ATM (index 0). We want index 0.
-                    # Quadratic mapping: 0->0, 1->1. Clusters at 0.
-                    skewed_u = u ** SKEW_POWER
-                else:
-                    # Puts end at ATM (index -1). We want index -1.
-                    # Quadratic mapping: 0->0, 1->1. Clusters at 1.
-                    skewed_u = 1 - (1 - u) ** SKEW_POWER
-                
-                idx_positions = (skewed_u * (count - 1)).astype(int)
-                selected_indices.update(candidates.iloc[idx_positions].index)
+    # Deterministic sampling to spread across maturities
+    if len(candidates) > target_size:
+        indices = np.linspace(0, len(candidates)-1, target_size, dtype=int)
+        candidates = [candidates[i] for i in indices]
+    return candidates
 
-    final_df = df.loc[list(selected_indices)].copy()
-    
-    return [
-        MarketOption(r['strike'], r['maturity'], r['market_price'], r['type'], r['bid'], r['ask'])
-        for _, r in final_df.iterrows()
-    ]
-
-
-# --- PART 1: THE DEDICATED SPOT FETCHER ---
 def get_market_implied_spot(ticker_symbol: str, r_curve) -> float:
     ticker = yf.Ticker(ticker_symbol)
-    
-    try:
-        # Use fast_info for a quick anchor
-        S_anchor = ticker.fast_info.get('last_price') or ticker.history(period="1d")['Close'].iloc[-1]
-    except:
-        return 0.0
-
-    expirations = ticker.options
-    if not expirations: return S_anchor
-    today = datetime.now()
-    
-    for exp_str in expirations[:5]:
-        d = datetime.strptime(exp_str, "%Y-%m-%d")
-        T = (d - today).days / 365.25
-        if T < 0.005: continue 
-        
+    try: S_anchor = ticker.fast_info['last_price']
+    except: return 0.0
+    for exp_str in ticker.options[:3]:
         try:
+            T = (datetime.strptime(exp_str, "%Y-%m-%d") - datetime.now()).days / 365.25
             chain = ticker.option_chain(exp_str)
-            calls, puts = chain.calls.copy(), chain.puts.copy()
-            calls['price'] = (calls['bid'] + calls['ask']) / 2
-            puts['price'] = (puts['bid'] + puts['ask']) / 2
-            
-            merged = pd.merge(calls, puts, on='strike', suffixes=('_c', '_p'))
-            atm_slice = merged[(merged['strike'] > S_anchor * 0.99) & (merged['strike'] < S_anchor * 1.01)].copy()
-            
-            if atm_slice.empty: continue
-            
-            # --- USE THE REAL RATE HERE ---
-            r = r_curve.get_rate(T) 
-            discount = np.exp(-r * T)
-            
-            # S = C - P + K*exp(-rT)
-            atm_slice.loc[:, 'S_imp'] = atm_slice['price_c'] - atm_slice['price_p'] + (atm_slice['strike'] * discount)
-            
-            return float(atm_slice['S_imp'].median())
-        except:
-            continue
+            merged = pd.merge(chain.calls, chain.puts, on='strike')
+            merged['C'], merged['P'] = (merged.bid_x + merged.ask_x)/2, (merged.bid_y + merged.ask_y)/2
+            atm = merged[(merged.strike > S_anchor*0.98) & (merged.strike < S_anchor*1.02)]
+            if atm.empty: continue
+            r = r_curve.get_rate(T)
+            return (atm.C - atm.P + atm.strike * np.exp(-r*T)).median()
+        except: continue
     return S_anchor
