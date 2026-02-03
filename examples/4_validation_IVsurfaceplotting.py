@@ -7,16 +7,54 @@ import pandas as pd
 import matplotlib.pyplot as plt
 from matplotlib import cm
 from scipy.ndimage import gaussian_filter 
+from scipy.interpolate import interp1d
 
 # Local package imports
 try:
-    from heston_pricer.calibration import implied_volatility, HestonCalibrator, SimpleYieldCurve
-    from heston_pricer.analytics import HestonAnalyticalPricer
+    from src.heston_pricer.calibration import implied_volatility, HestonCalibrator
+    from src.heston_pricer.analytics import HestonAnalyticalPricer
 except ImportError:
-    import sys
-    sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'src')))
-    from heston_pricer.calibration import implied_volatility, HestonCalibrator, SimpleYieldCurve
-    from heston_pricer.analytics import HestonAnalyticalPricer
+    pass
+
+# --- 1. COMPATIBILITY HELPERS ---
+class RobustYieldCurve:
+    """
+    Parses the new dictionary-style curves {"0.08Y": 0.035, ...}
+    and allows extrapolation for the T=2.5 plotting range.
+    """
+    def __init__(self, curve_data):
+        times, rates = [], []
+        
+        # Handle Dictionary Format (New)
+        if isinstance(curve_data, dict):
+            for k, v in curve_data.items():
+                try:
+                    # Strip 'Y', 'week', etc to get float
+                    t_str = str(k).lower().replace("y", "").replace("week", "")
+                    times.append(float(t_str))
+                    rates.append(float(v))
+                except: continue
+        # Handle List/Object Format (Old)
+        elif hasattr(curve_data, 'tenors'):
+            times = curve_data.tenors
+            rates = curve_data.rates
+        else:
+            # Scalar fallback
+            times = [0.0, 30.0]
+            rates = [float(curve_data), float(curve_data)]
+
+        # Sort for interpolation
+        sorted_pairs = sorted(zip(times, rates))
+        self.ts = np.array([p[0] for p in sorted_pairs])
+        self.rs = np.array([p[1] for p in sorted_pairs])
+        
+        # Linear interp with Flat Extrapolation (so T=2.5 works)
+        self.interp = interp1d(self.ts, self.rs, kind='linear', 
+                               bounds_error=False, 
+                               fill_value=(self.rs[0], self.rs[-1]))
+
+    def get_rate(self, T):
+        return float(self.interp(max(T, 1e-4)))
 
 class ReconstructedOption:
     def __init__(self, strike, maturity, price, option_type="CALL"):
@@ -38,34 +76,35 @@ def load_latest_calibration():
     
     with open(latest_meta, 'r') as f: data = json.load(f)
     
-    def reconstruct_curve(curve_data):
-        if isinstance(curve_data, dict) and 'tenors' in curve_data:
-            return SimpleYieldCurve(curve_data['tenors'], curve_data['rates'])
-        else:
-            val = float(curve_data)
-            return SimpleYieldCurve([0.0, 30.0], [val, val])
-
-    # Reconstruct both curves to avoid float-dict operand errors
-    r_curve = reconstruct_curve(data['market']['r'])
-    q_curve = reconstruct_curve(data['market']['q'])
+    # Use RobustYieldCurve to handle the dictionary format
+    r_data = data['market'].get('r_sample', data['market'].get('r'))
+    q_data = data['market'].get('q_sample', data['market'].get('q'))
+    
+    r_curve = RobustYieldCurve(r_data)
+    q_curve = RobustYieldCurve(q_data)
 
     csv_file = f"{base_name}_prices.csv"
     market_options = []
     if os.path.exists(csv_file):
         df = pd.read_csv(csv_file)
         for _, row in df.iterrows():
-            otype = row['Type'] if 'Type' in row else "CALL"
-            market_options.append(ReconstructedOption(row['K'], row['T'], row['Mkt'], otype))
+            # Handle variable column names
+            k = row.get('K', row.get('Strike', 0))
+            t = row.get('T', row.get('Maturity', 0))
+            p = row.get('Market', row.get('Price', 0))
+            otype = row.get('Type', "CALL")
+            market_options.append(ReconstructedOption(k, t, p, otype))
 
     return data, r_curve, q_curve, market_options, base_name
 
 def select_best_parameters(data):
     res_ana = data.get('analytical', {})
-    res_mc = data.get('monte_carlo', data.get('monte_carlo_results', {}))
+    res_mc = data.get('monte_carlo', {})
 
+    # Support both old 'fun' and new 'weighted_obj'
     def get_score(res):
-        if not res or 'fun' not in res: return float('inf')
-        return res['fun']
+        if not res: return float('inf')
+        return res.get('weighted_obj', res.get('fun', float('inf')))
 
     score_ana = get_score(res_ana)
     score_mc = get_score(res_mc)
@@ -80,12 +119,13 @@ def select_best_parameters(data):
         print("\n[Selection] No valid results found. Using default guess.")
         return {'kappa':2.0, 'theta':0.04, 'xi':0.5, 'rho':-0.7, 'v0':0.04}, "Default"
 
+# --- 2. EXACT PLOTTING FUNCTION (Unchanged Visuals) ---
 def plot_surface_professional(S0, r_curve, q_curve, params, ticker, filename, market_options, data_full, dropped_count, source_name):
     kappa, theta, xi, rho, v0 = params['kappa'], params['theta'], params['xi'], params['rho'], params['v0']
 
     # --- 1. CONFIGURATION ---
     LOWER_M, UPPER_M = 0.5, 1.8 
-    LOWER_T, UPPER_T = 0.1, 2.5
+    LOWER_T, UPPER_T = 0.1, 2.5 # Kept the wide range per request
     GRID_DENSITY = 100 
 
     M_range = np.linspace(LOWER_M, UPPER_M, GRID_DENSITY)
@@ -184,11 +224,16 @@ def plot_surface_professional(S0, r_curve, q_curve, params, ticker, filename, ma
         fig.text(0.535, 0.81, subtitle, color='#AAAAAA', fontsize=10, family='monospace', ha='center')
 
         # --- 5. PERFORMANCE METRICS ---
+        # Update: Look for 'weighted_obj' first
+        obj_val = params.get('weighted_obj', params.get('fun', 0))
+        # Update: Look for 'rmse' first (Ana), then 'rmse_iv' (MC)
+        rmse_val = params.get('rmse', params.get('rmse_iv', 0))
+
         comparison_text = (
             f"Model Source: {source_name}\n"
             f"-------------------\n"
-            f"Final RMSE (IV):    {params.get('rmse_iv', 0):.5f}\n"
-            f"Obj Function:       {params.get('fun', 0):.5f}\n"
+            f"Final RMSE ($):     {rmse_val:.4f}\n"
+            f"Obj Function:       {obj_val:.4f}\n"
             f"Feller Condition:   {'Met' if (2*kappa*theta > xi**2) else 'Violated'}\n"
             f"Outliers Removed:   {dropped_count}"
         )
@@ -206,7 +251,7 @@ def plot_surface_professional(S0, r_curve, q_curve, params, ticker, filename, ma
         cbar.outline.set_visible(False)
 
         save_path = f"{filename}_surface_refined.png"
-        plt.savefig(save_path, dpi=600, facecolor='black', bbox_inches='tight')
+        plt.savefig(save_path, dpi=300, facecolor='black', bbox_inches='tight')
         print(f"-> Saved: {save_path}")
         plt.close()
 
@@ -218,7 +263,7 @@ def main():
         best_params, source_name = select_best_parameters(data)
         ticker = base_name.split("calibration_")[1].split("_")[0] if "calibration_" in base_name else "Asset"
         
-        print(f"\n[Direct Plot] Using {source_name} parameters directly (skipping refinement).")
+        print(f"\n[Direct Plot] Using {source_name} parameters directly.")
         
         plot_surface_professional(
             S0, r_curve, q_curve, best_params, ticker, base_name, 

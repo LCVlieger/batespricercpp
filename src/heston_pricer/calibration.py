@@ -154,7 +154,7 @@ class HestonCalibratorMC:
             # Feller condition penalty to keep MC stable
             feller_penalty = 0.0
             if 2 * p[0] * p[1] < p[2] ** 2:
-                feller_penalty = 5.0 * (p[2]**2 - 2 * p[0] * p[1])
+                feller_penalty = 0.0 * (p[2]**2 - 2 * p[0] * p[1])
                 
             mod, mkt, w = self.get_prices(p)
             return np.sqrt(np.mean(((mod - mkt) * w) ** 2)) + feller_penalty

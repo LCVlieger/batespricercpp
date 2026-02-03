@@ -28,6 +28,7 @@ class NSSYieldCurve:
     def get_rate(self, T: float) -> float:
         return float(self.curve(max(T, 1e-4)))
     def to_dict(self):
+        # Sample for meta storage
         return {f"{round(t,3)}Y": self.get_rate(t) for t in [0.08, 0.25, 0.5, 1.0]}
 
 def fetch_treasury_rates_fred(date_str: str, api_key: str) -> NSSYieldCurve:
@@ -54,43 +55,40 @@ def fetch_treasury_rates_fred(date_str: str, api_key: str) -> NSSYieldCurve:
 # --- PART 2: ROBUST DIVIDEND ENGINE ---
 class ImpliedDividendCurve:
     """
-    Industry-grade dividend engine. Uses Regression PCP on liquid pillars.
-    Ignores short-end noise (<1M) to prevent yield explosions.
+    Data-driven dividend engine. Estimates q from Linear Regression 
+    of Put-Call Parity across all pillars.
     """
     def __init__(self, df: pd.DataFrame, S0_anchor: float, r_curve):
         self.yields = {}
         
-        # Filter pillars: Only use 1M to 1.3Y (Stability over Noise)
-        # We ignore T < 0.07 to avoid the 1/T noise magnification
-        unique_Ts = sorted([t for t in df['T'].unique() if 0.07 <= t <= 1.3])
+        # STABILITY FILTER: We only use tenors >= 1 Month (0.07) for the curve.
+        # Short-dated noise (<1M) will be handled by flat extrapolation in get_rate().
+        # This effectively "aligns" the 1-week and 2-week with the 1-month anchor.
+        unique_Ts = sorted([t for t in df['T'].unique() if t >= 0.07])
         
         for T in unique_Ts:
             subset = df[df['T'] == T]
-            # Use ATM options (+/- 8% moneyness) for regression stability
-            mask = (subset['STRIKE'] > S0_anchor * 0.92) & (subset['STRIKE'] < S0_anchor * 1.08)
+            # Focus on ATM strikes (+/- 10%) for regression stability
+            mask = (subset['STRIKE'] > S0_anchor * 0.90) & (subset['STRIKE'] < S0_anchor * 1.10)
             data = subset[mask].dropna()
             
             if len(data) < 5: continue
             
-            # Regression PCP: (C - P) = exp(-rT) * F - exp(-rT) * K
-            # Model: y = alpha + beta * K
+            # (C - P) = e^(-rT) * F - e^(-rT) * K
             X = data['STRIKE'].values.reshape(-1, 1)
             y = (data['C_MID'] - data['P_MID']).values
             
             reg = LinearRegression().fit(X, y)
             alpha, beta = reg.intercept_, reg.coef_[0]
             
-            # F = -alpha / beta (Market implied forward)
             if beta < 0:
                 F_implied = -alpha / beta
                 r = r_curve.get_rate(T)
-                # Solve for q: F = S0 * exp((r-q)T) -> q = r - ln(F/S0)/T
+                # q = r - ln(F/S0)/T
                 q = r - np.log(F_implied / S0_anchor) / T
-                
-                # Clamp to realistic SPX range (0.2% to 2.5%)
-                self.yields[T] = max(0.002, min(q, 0.025))
+                # Clamp to realistic SPX range
+                self.yields[T] = max(0.0001, min(q, 0.05))
 
-        # Setup Monotonic Cubic Spline (Pchip)
         mats = np.array(sorted(self.yields.keys()))
         vals = np.array([self.yields[m] for m in mats])
         
@@ -99,12 +97,12 @@ class ImpliedDividendCurve:
             self.min_T, self.max_T = mats[0], mats[-1]
             self.val_min, self.val_max = vals[0], vals[-1]
         else:
-            default = vals[0] if len(vals) > 0 else 0.013 # SPX default
+            default = vals[0] if len(vals) > 0 else 0.013
             self.interpolator = lambda t: default
             self.min_T, self.max_T, self.val_min, self.val_max = 0, 99, default, default
 
     def get_rate(self, T: float) -> float:
-        # Flat extrapolation outside the pillar range for stability
+        # Align short-dated (1W, 2W) with the 1-Month source of truth
         if T < self.min_T: return float(self.val_min)
         if T > self.max_T: return float(self.val_max)
         return float(self.interpolator(T))
@@ -112,13 +110,12 @@ class ImpliedDividendCurve:
     def to_dict(self):
         return {str(round(k,3)): v for k,v in self.yields.items()}
 
-# --- PART 3: OPTIMIZED DATA FETCHING ---
+# --- PART 3: DATA FETCHING & DYNAMIC SPOT ANCHOR ---
 def fetch_raw_data(ticker_symbol: str) -> pd.DataFrame:
-    """Parallel fetch of liquid monthly/quarterly monthly pillars."""
+    """Parallel fetch of liquid monthly/quarterly contracts."""
     ticker = yf.Ticker(ticker_symbol)
     today = datetime.now()
-    # Focus on standard monthly tenors for a clean curve
-    targets = [0.08, 0.17, 0.25, 0.5, 0.75, 1.0, 1.25] 
+    targets = [0.019, 0.08, 0.17, 0.25, 0.5, 0.75, 1.0, 1.25] 
     
     selected_exps = set()
     all_exps = ticker.options
@@ -138,35 +135,56 @@ def fetch_raw_data(ticker_symbol: str) -> pd.DataFrame:
         except: return None
 
     with ThreadPoolExecutor(max_workers=8) as executor:
-        results = list(executor.map(fetch_one, selected_exps))
+        results = list(executor.map(fetch_one, sorted(list(selected_exps))))
     return pd.concat([r for r in results if r is not None], ignore_index=True)
 
 def get_market_implied_spot(ticker_symbol: str, raw_df: pd.DataFrame, r_curve) -> float:
     """
-    Derives a synchronized S0 anchor.
-    This prevents run-to-run drift by aligning spot with the option prices.
+    DERIVES THE SPOT ANCHOR FROM MARKET DATA.
+    Uses long-tenor stability to estimate the dividend baseline, then
+    synchronizes the 1-month forward to find the true spot.
     """
-    # Use the 1-month pillar as the master anchor
-    unique_Ts = sorted(raw_df['T'].unique())
-    anchor_T = min(unique_Ts, key=lambda x: abs(x - 0.08))
+    ticker = yf.Ticker(ticker_symbol)
+    S_cash = ticker.fast_info['last_price']
     
-    subset = raw_df[raw_df['T'] == anchor_T].copy()
-    r = r_curve.get_rate(anchor_T)
+    # 1. Detect the current Market Baseline Yield from stable long tenors (T > 0.5)
+    stable_Ts = sorted([t for t in raw_df['T'].unique() if t >= 0.5])
+    baseline_qs = []
     
-    # Simple Regression to find the Forward
-    X = subset['STRIKE'].values.reshape(-1, 1)
-    y = (subset['C_MID'] - subset['P_MID']).values
-    reg = LinearRegression().fit(X, y)
-    F = -reg.intercept_ / reg.coef_[0]
+    for T in stable_Ts:
+        subset = raw_df[raw_df['T'] == T]
+        X = subset['STRIKE'].values.reshape(-1, 1)
+        y = (subset['C_MID'] - subset['P_MID']).values
+        reg = LinearRegression().fit(X, y)
+        F_T = -reg.intercept_ / reg.coef_[0]
+        r_T = r_curve.get_rate(T)
+        
+        # Estimate raw q relative to cash (low noise at T > 0.5)
+        baseline_qs.append(r_T - np.log(F_T / S_cash) / T)
     
-    # We anchor S0 by assuming a baseline SPX yield of ~1.3% at 1-month
-    S0_consistent = F * np.exp(-(r - 0.013) * anchor_T)
-    return float(S0_consistent)
+    market_baseline_q = np.median(baseline_qs) if baseline_qs else 0.013
+    print(f"Detected Market Baseline q: {market_baseline_q:.4%}")
+    
+    # 2. Use the 1-month pillar to find the synchronized Spot
+    anchor_T = min(raw_df['T'].unique(), key=lambda x: abs(x - 0.0833))
+    subset_anchor = raw_df[raw_df['T'] == anchor_T]
+    
+    X_a = subset_anchor['STRIKE'].values.reshape(-1, 1)
+    y_a = (subset_anchor['C_MID'] - subset_anchor['P_MID']).values
+    reg_a = LinearRegression().fit(X_a, y_a)
+    F_anchor = -reg_a.intercept_ / reg_a.coef_[0]
+    r_anchor = r_curve.get_rate(anchor_T)
+    
+    # Synchronized S0 = Forward / exp((r - baseline_q) * T)
+    # This aligns the Spot to the options plane using the baseline yield.
+    S0_synchronized = F_anchor / np.exp((r_anchor - market_baseline_q) * anchor_T)
+    
+    return float(S0_synchronized)
 
 def fetch_options(ticker_symbol: str, S0: float, target_size: int = 300) -> List[MarketOption]:
-    """Fetches the broad calibration dataset."""
     ticker = yf.Ticker(ticker_symbol)
     today = datetime.now()
+    # Filter for standard liquid maturities (>= 2 weeks)
     valid_exps = [e for e in ticker.options if 0.04 <= (datetime.strptime(e, "%Y-%m-%d") - today).days/365.25 <= 1.3]
     
     def process(exp_str):
@@ -174,7 +192,6 @@ def fetch_options(ticker_symbol: str, S0: float, target_size: int = 300) -> List
             T = (datetime.strptime(exp_str, "%Y-%m-%d") - today).days / 365.25
             chain = ticker.option_chain(exp_str)
             local = []
-            # Standard OTM filtering for Heston calibration
             for opt_type, data, f in [('PUT', chain.puts, lambda k: k < S0), ('CALL', chain.calls, lambda k: k > S0)]:
                 subset = data[f(data['strike']) & (data['strike'] > S0*0.75) & (data['strike'] < S0*1.25)]
                 for _, row in subset.iterrows():
