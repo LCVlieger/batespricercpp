@@ -10,7 +10,6 @@ from dataclasses import dataclass
 from typing import List, Dict
 from sklearn.linear_model import LinearRegression
 from scipy.interpolate import PchipInterpolator
-from scipy.optimize import brentq
 from scipy.stats import norm
 from concurrent.futures import ThreadPoolExecutor
 from collections import defaultdict
@@ -18,27 +17,14 @@ from collections import defaultdict
 # --- IMPORTS FROM YOUR PACKAGE ---
 try:
     from heston_pricer.calibration import HestonCalibrator, HestonCalibratorMC
-    from heston_pricer.analytics import HestonAnalyticalPricer
+    from heston_pricer.analytics import HestonAnalyticalPricer, implied_volatility
     from heston_pricer.market import MarketEnvironment
     from heston_pricer.data import ImpliedDividendCurve, fetch_treasury_rates_fred, get_market_implied_spot, fetch_raw_data, fetch_options
     from nelson_siegel_svensson.calibrate import calibrate_nss_ols
 except ImportError:
     print("Warning: Ensure 'heston_pricer' is in your PYTHONPATH.")
 
-# =================================================================
-# 1. UTILITIES (IV & VALIDATION)
-# =================================================================
-def implied_volatility(price, S, K, T, r, q, option_type="CALL"):
-    if price <= 0: return 0.0
-    intrinsic = max(K * np.exp(-r*T) - S * np.exp(-q*T), 0) if option_type == "PUT" else max(S * np.exp(-q*T) - K * np.exp(-r*T), 0)
-    if price < intrinsic: return 0.0
-    def bs_price(sigma):
-        d1 = (np.log(S / K) + (r - q + 0.5 * sigma ** 2) * T) / (sigma * np.sqrt(T))
-        d2 = d1 - sigma * np.sqrt(T)
-        val = (K * np.exp(-r * T) * norm.cdf(-d2) - S * np.exp(-q * T) * norm.cdf(-d1)) if option_type == "PUT" else (S * np.exp(-q * T) * norm.cdf(d1) - K * np.exp(-r * T) * norm.cdf(d2))
-        return val - price
-    try: return brentq(bs_price, 0.001, 5.0)
-    except: return 0.0
+
 
 # =================================================================
 # 3. SAVING & VALIDATION (RE-PRICING MC FOR REPORT TRUTH)
@@ -71,7 +57,7 @@ def save_results(ticker, S0, r_curve, q_curve, res_ana, res_mc, options):
     raw_weights = []
     for opt in options:
         r, q = r_curve.get_rate(opt.maturity), q_curve.get_rate(opt.maturity)
-        vega = calculate_bs_vega(S0, opt.strike, opt.maturity, r, q, 0.20)
+        vega = 1 #calculate_bs_vega(S0, opt.strike, opt.maturity, r, q, 0.20)
         spread = max(abs(opt.ask - opt.bid), 0.01)
         raw_weights.append(1.0 / (spread * vega))
     
@@ -84,7 +70,7 @@ def save_results(ticker, S0, r_curve, q_curve, res_ana, res_mc, options):
     p_mc_params = get_p(res_mc)
 
     weighted_sq_err_mc = []
-    
+    weighted_sq_err_ana = []
     for i, opt in enumerate(options):
         r, q = r_curve.get_rate(opt.maturity), q_curve.get_rate(opt.maturity)
         
@@ -93,9 +79,10 @@ def save_results(ticker, S0, r_curve, q_curve, res_ana, res_mc, options):
         model_mc_exact = HestonAnalyticalPricer.price_european_call(S0, opt.strike, opt.maturity, r, q, *p_mc_params)
         iv = implied_volatility(opt.market_price, S0, opt.strike, opt.maturity, r, q, "CALL")
         
+        err_ana = model_ana - opt.market_price
         err_mc = model_mc_exact - opt.market_price
+        weighted_sq_err_ana.append((err_ana * normalized_weights[i])**2)
         weighted_sq_err_mc.append((err_mc * normalized_weights[i])**2)
-        
         rows.append({
             "T": round(opt.maturity, 3), "K": opt.strike, "Market": round(opt.market_price, 2),
             "Ana_Price": round(model_ana, 2), "Ana_Err": round(model_ana - opt.market_price, 2),
@@ -109,8 +96,8 @@ def save_results(ticker, S0, r_curve, q_curve, res_ana, res_mc, options):
     # --- 3. DERIVE FINAL METRICS ---
     rmse_ana = np.sqrt((df["Ana_Err"]**2).mean())
     rmse_mc_true = np.sqrt((df["MC_Err"]**2).mean())
+    w_obj_ana = np.sqrt(np.mean(weighted_sq_err_ana))
     w_obj_mc_exact = np.sqrt(np.mean(weighted_sq_err_mc))
-    
     # Store "True" analytical weighted objective in the meta
     res_mc_fixed = res_mc.copy()
     res_mc_fixed['weighted_obj_internal'] = res_mc.get('weighted_obj') # The noisy simulation score
@@ -133,8 +120,9 @@ def save_results(ticker, S0, r_curve, q_curve, res_ana, res_mc, options):
     
     mean_price = df["Market"].mean()
     print(f"Analytical RMSE: {rmse_ana:.4f} ({rmse_ana/mean_price:.2%} of avg price)")
-    print(f"Monte Carlo TRUE RMSE: {rmse_mc_true:.4f} ({rmse_mc_true/mean_price:.2%} of avg price)")
-    print(f"Monte Carlo TRUE Weighted Obj: {w_obj_mc_exact:.4f}")
+    print(f"Analytical Weighted Obj: {w_obj_ana:.4f} ({w_obj_ana/mean_price:.2%} of avg price)")
+    print(f"Monte Carlo RMSE (True): {rmse_mc_true:.4f} ({rmse_mc_true/mean_price:.2%} of avg price)")
+    print(f"Monte Carlo Weighted Obj (True): {w_obj_mc_exact:.4f}")
     print("="*80)
     print(f"Saved results to: {base_name}_prices.csv")
 
@@ -184,7 +172,7 @@ def main():
     print(f"k: {res_a['kappa']:.4f} | th: {res_a['theta']:.4f} | xi: {res_a['xi']:.4f} | rho: {res_a['rho']:.4f} | v0: {res_a['v0']:.4f}\n")
     print(f"{'='*20} 2. MONTE CARLO CALIBRATION {'='*20}")
     t1 = time.time()
-    calib_mc = HestonCalibratorMC(S0=S0_actual, r_curve=r_curve, q_curve=q_curve, n_paths=30000, n_steps=400)
+    calib_mc = HestonCalibratorMC(S0=S0_actual, r_curve=r_curve, q_curve=q_curve, n_paths=5000, n_steps=2000)
     x0 = [res_a[k] for k in ['kappa','theta','xi','rho','v0']]
     res_mc = calib_mc.calibrate(options_processed)
     print(f"MONTE CARLO RESULTS (Time: {time.time()-t1:.2f}s)")

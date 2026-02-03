@@ -67,7 +67,7 @@ class HestonCalibrator:
         res = minimize(
             objective, 
             x0, 
-            method='L-BFGS-B', 
+            method= 'L-BFGS-B',  #'SLSQP', #
             bounds=bounds, 
             callback=callback, 
             tol=1e-9, 

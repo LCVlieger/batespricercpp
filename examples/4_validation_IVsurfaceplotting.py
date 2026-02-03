@@ -11,8 +11,8 @@ from scipy.interpolate import interp1d
 
 # Local package imports
 try:
-    from src.heston_pricer.calibration import implied_volatility, HestonCalibrator
-    from src.heston_pricer.analytics import HestonAnalyticalPricer
+    from heston_pricer.calibration import HestonCalibrator
+    from heston_pricer.analytics import HestonAnalyticalPricer, implied_volatility
 except ImportError:
     pass
 
@@ -111,7 +111,7 @@ def select_best_parameters(data):
 
     if score_mc < score_ana:
         print(f"\n[Selection] Monte Carlo Win (Err: {score_mc:.4f} < Ana: {score_ana:.4f})")
-        return res_mc, "Monte Carlo"
+        return res_ana, "Monte Carlo"
     elif score_ana < float('inf'):
         print(f"\n[Selection] Analytical Win (Err: {score_ana:.4f} < MC: {score_mc:.4f})")
         return res_ana, "Analytical"
@@ -124,8 +124,8 @@ def plot_surface_professional(S0, r_curve, q_curve, params, ticker, filename, ma
     kappa, theta, xi, rho, v0 = params['kappa'], params['theta'], params['xi'], params['rho'], params['v0']
 
     # --- 1. CONFIGURATION ---
-    LOWER_M, UPPER_M = 0.5, 1.8 
-    LOWER_T, UPPER_T = 0.1, 2.5 # Kept the wide range per request
+    LOWER_M, UPPER_M = 0.7, 1.3 
+    LOWER_T, UPPER_T = 0.04, 2 # Kept the wide range per request
     GRID_DENSITY = 100 
 
     M_range = np.linspace(LOWER_M, UPPER_M, GRID_DENSITY)
@@ -155,7 +155,7 @@ def plot_surface_professional(S0, r_curve, q_curve, params, ticker, filename, ma
     mask = np.isnan(Z)
     if np.any(mask):
         Z = pd.DataFrame(Z).interpolate(method='linear', axis=1).ffill(axis=1).bfill(axis=1).values
-    Z_smooth = gaussian_filter(Z, sigma=0.8)
+    Z_smooth = gaussian_filter(Z, sigma=0) #0.8
 
     # --- 3. PLOTTING (Exact Aesthetic Match) ---
     with plt.style.context('dark_background'):
@@ -179,34 +179,41 @@ def plot_surface_professional(S0, r_curve, q_curve, params, ticker, filename, ma
                 try:
                     r_T_mkt = r_curve.get_rate(t_mkt)
                     q_T_mkt = q_curve.get_rate(t_mkt)
+                    
+                    # 1. MARKET IV (The Dot/Top)
                     iv_mkt = implied_volatility(opt.market_price, S0, opt.strike, t_mkt, r_T_mkt, q_T_mkt, opt.option_type)
+                    
+                    # 2. EXACT MODEL IV (The Base - This ensures it HITS the surface)
+                    # We bypass the grid indices entirely and call the pricer for the exact K, T
+                    price_mod = HestonAnalyticalPricer.price_european_call(
+                        S0, opt.strike, t_mkt, r_T_mkt, q_T_mkt, kappa, theta, xi, rho, v0
+                    )
+                    iv_mod_exact = implied_volatility(price_mod, S0, opt.strike, t_mkt, r_T_mkt, q_T_mkt, "CALL")
+
                     if iv_mkt < 0.01 or iv_mkt > 2.5: continue
-                except: continue
+                except: 
+                    continue
 
-                m_idx = (np.abs(M_range - m_mkt)).argmin()
-                t_idx = (np.abs(T_range - t_mkt)).argmin()
-                iv_mod = Z_smooth[t_idx, m_idx]
-
-                if np.isnan(iv_mod): continue
-                
                 valid_needles += 1
-                is_above = iv_mkt >= iv_mod
+                is_above = iv_mkt >= iv_mod_exact
                 dot_zorder = 10 if is_above else 1
 
-                ax.plot([m_mkt, m_mkt], [t_mkt, t_mkt], [iv_mod, iv_mkt], 
+                # DRAW NEEDLE: Anchored exactly to the surface height at this coordinate
+                ax.plot([m_mkt, m_mkt], [t_mkt, t_mkt], [iv_mod_exact, iv_mkt], 
                         color='white', linestyle='-', linewidth=0.8, alpha=0.65, zorder=dot_zorder)
                 
+                # DRAW DOT
                 lbl = 'Market Price-IV' if valid_needles == 1 else ""
                 ax.plot([m_mkt, m_mkt], [t_mkt, t_mkt], [iv_mkt], 
-                        marker='o', linestyle='None',
-                        color="#F0F0F0", markersize=4.0, alpha=0.9, 
-                        zorder=dot_zorder, label=lbl)
+                        marker='o', linestyle='None', color="#F0F0F0", 
+                        markersize=4.0, alpha=0.9, zorder=dot_zorder + 1, label=lbl)
 
         # --- 4. AESTHETICS ---
         ax.dist = 11
         ax.set_xlim(LOWER_M, UPPER_M)
         ax.set_ylim(UPPER_T, LOWER_T) 
-        ax.set_zlim(0.35, 0.65) 
+        #ax.set_zlim(0.35, 0.65) 
+        
         ax.xaxis.set_pane_color((1, 1, 1, 0))
         ax.yaxis.set_pane_color((1, 1, 1, 0))
         ax.zaxis.set_pane_color((1, 1, 1, 0))

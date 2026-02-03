@@ -1,6 +1,19 @@
-import numpy as np
 from scipy.stats import norm
 import numpy as np
+from scipy.optimize import brentq
+
+
+def implied_volatility(price, S, K, T, r, q, option_type="CALL"): 
+    if price <= 0: return 0.0
+    intrinsic = max(K * np.exp(-r*T) - S * np.exp(-q*T), 0) if option_type == "PUT" else max(S * np.exp(-q*T) - K * np.exp(-r*T), 0)
+    if price < intrinsic: return 0.0
+    def bs_price(sigma):
+        d1 = (np.log(S / K) + (r - q + 0.5 * sigma ** 2) * T) / (sigma * np.sqrt(T))
+        d2 = d1 - sigma * np.sqrt(T)
+        val = (K * np.exp(-r * T) * norm.cdf(-d2) - S * np.exp(-q * T) * norm.cdf(-d1)) if option_type == "PUT" else (S * np.exp(-q * T) * norm.cdf(d1) - K * np.exp(-r * T) * norm.cdf(d2))
+        return val - price
+    try: return brentq(bs_price, 0.001, 5.0)
+    except: return 0.0
 
 class HestonAnalyticalPricer:
     """
