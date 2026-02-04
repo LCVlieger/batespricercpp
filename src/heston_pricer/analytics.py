@@ -44,7 +44,7 @@ class BatesAnalyticalPricer:
             Array of computed option prices.
         """
         # High density grid matching your optimized implementation
-        N_grid, u_max = 1000, 200.0
+        N_grid, u_max = 1000, 200
         du = u_max / N_grid
         # Shape: (N_grid, 1)
         u = np.linspace(1e-8, u_max, N_grid)[:, np.newaxis] 

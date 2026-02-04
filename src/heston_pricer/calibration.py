@@ -126,7 +126,7 @@ class HestonCalibratorMC:
         
         # 1. Calculate Robust Weights across ALL options first
         spreads = np.array([max(abs(o.ask - o.bid), 0.01) for o in options])
-        raw_weights = 1.0 / spreads
+        raw_weights = 1.0 # / spreads
         cap_val = np.mean(raw_weights) + sigma_cap * np.std(raw_weights)
         all_weights = np.clip(raw_weights, None, cap_val)
         

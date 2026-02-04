@@ -77,14 +77,15 @@ def save_results(ticker, S0, r_curve, q_curve, res_ana, options):
         
         # Calculate Implied Vol only for reporting
         iv_mkt = implied_volatility(opt.market_price, S0, opt.strike, opt.maturity, r, q, "CALL")
-        
+        iv_model = implied_volatility(model_p, S0, opt.strike, opt.maturity, r, q, "CALL")
         rows.append({
             "T": round(opt.maturity, 3), 
             "K": opt.strike, 
             "Market": round(opt.market_price, 2),
             "Model": round(model_p, 2), 
             "Err": round(err_ana, 2),
-            "IV_Mkt": round(iv_mkt, 4)
+            "IV_Mkt": round(iv_mkt, 4),
+            "IV_Model": round(iv_model, 4)
         })
 
     df = pd.DataFrame(rows)
@@ -146,14 +147,21 @@ def main():
     options_raw = fetch_options(ticker, S0_actual, target_size=300)
     
     # 2. Processing (Synthetic Calls)
+    # --- 2. Processing (CLEAN OTM DATA) ---
     options_processed = []
-    print(f"Processing {len(options_raw)} options (Synthetic Calls)...")
+    print(f"Processing {len(options_raw)} RAW OTM options...")
+
     for opt in options_raw:
-        r_T, q_T = r_curve.get_rate(opt.maturity), q_curve.get_rate(opt.maturity)
-        if opt.option_type == "PUT":
-            # Put-Call Parity conversion
-            price = opt.market_price + (S0_actual * np.exp(-q_T * opt.maturity) - opt.strike * np.exp(-r_T * opt.maturity))
-            opt.market_price, opt.option_type = price, "CALL"
+        # 1. Filter out the noise
+        moneyness = opt.strike / S0_actual
+        if opt.maturity < 0.05 and (moneyness < 0.94 or moneyness > 1.06):
+            continue
+        
+        if opt.market_price < 0.50:
+            continue
+
+        # 2. DO NOT CONVERT. Keep Puts as Puts, Calls as Calls.
+        # The calibrator handles the 'types' array internally.
         options_processed.append(opt)
     
     # 3. Calibration
