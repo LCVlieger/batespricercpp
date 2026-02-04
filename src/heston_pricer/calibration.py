@@ -46,7 +46,7 @@ class BatesCalibrator:
         r_vec = np.array([self.r_curve.get_rate(t) for t in maturities])
         q_vec = np.array([self.q_curve.get_rate(t) for t in maturities])
         
-        weights = 1 #self._calculate_robust_weights(options, sigma_cap)
+        weights = self._calculate_robust_weights(options, sigma_cap)
 
         # Order: kappa, theta, xi, rho, v0, lamb (intensity), mu_j (mean jump), sigma_j (jump vol)
         bounds = [
