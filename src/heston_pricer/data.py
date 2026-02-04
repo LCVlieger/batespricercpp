@@ -5,7 +5,7 @@ import numpy as np
 import pandas as pd
 import requests
 import yfinance as yf
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, time as dt_time
 from dataclasses import dataclass
 from typing import List, Dict
 from scipy.interpolate import PchipInterpolator, interp1d
@@ -28,7 +28,6 @@ class NSSYieldCurve:
     def get_rate(self, T: float) -> float:
         return float(self.curve(max(T, 1e-4)))
     def to_dict(self):
-        # Sample for meta storage
         return {f"{round(t,3)}Y": self.get_rate(t) for t in [0.08, 0.25, 0.5, 1.0]}
 
 def fetch_treasury_rates_fred(date_str: str, api_key: str) -> NSSYieldCurve:
@@ -52,40 +51,58 @@ def fetch_treasury_rates_fred(date_str: str, api_key: str) -> NSSYieldCurve:
             return NSSYieldCurve(curve_fit)
     raise ValueError("Could not fetch FRED rates.")
 
+# --- PART 2: SETTLEMENT & TIME ENGINE ---
+
+def is_third_friday(d: datetime) -> bool:
+    """Detects if a date is the 3rd Friday of the month (Standard SPX Monthly)."""
+    return d.weekday() == 4 and 15 <= d.day <= 21
+
+def calculate_spx_time_to_maturity(expiry_date: datetime) -> float:
+    """
+    Standardizes T for SPX AM vs PM settlement.
+    Monthly (3rd Friday) expires Friday AM at 9:30 ET.
+    Weekly/Daily expires Friday PM at 16:00 ET.
+    """
+    now = datetime.now()
+    
+    if is_third_friday(expiry_date):
+        # Standard Monthly: AM Settled
+        expiry_settlement = datetime.combine(expiry_date.date(), dt_time(9, 30))
+    else:
+        # Weeklies/Daily: PM Settled
+        expiry_settlement = datetime.combine(expiry_date.date(), dt_time(16, 0))
+    
+    delta = expiry_settlement - now
+    # 365.25 to account for leap years in professional calendars
+    seconds_in_year = 365.25 * 24 * 3600
+    
+    return max(delta.total_seconds() / seconds_in_year, 1e-6)
+
+# --- PART 3: DIVIDEND ENGINE ---
 
 class ImpliedDividendCurve:
-    """
-    Market-implied dividend engine. Synchronizes the forward price 
-    using Put-Call Parity at the ATM strike for every tenor.
-    """
     def __init__(self, df: pd.DataFrame, S0_anchor: float, r_curve):
         self.yields = {}
         unique_Ts = sorted(df['T'].unique()) 
         
         for T in unique_Ts:
             subset = df[df['T'] == T]
-            # Find the strike closest to spot (ATM)
             atm_idx = (subset['STRIKE'] - S0_anchor).abs().idxmin()
             atm_opt = subset.loc[atm_idx]
             
-            # Put-Call Parity: F = (C - P) * e^(rT) + K
             r = r_curve.get_rate(T)
             C, P, K = atm_opt['C_MID'], atm_opt['P_MID'], atm_opt['STRIKE']
             
-            # Back-solve for Market-Implied Forward (F)
-            # This is the price the market 'expects' for the future index level
+            # Put-Call Parity synchronization
             F_market = (C - P) * np.exp(r * T) + K
             
-            # F = S0 * e^((r-q)T)  =>  q = r - ln(F/S0) / T
             if T > 1e-4:
                 q_sync = r - np.log(F_market / S0_anchor) / T
             else:
                 q_sync = 0.0
             
-            # Store the synchronized yield for this tenor
             self.yields[T] = float(np.clip(q_sync, -0.15, 0.15))
 
-        # --- INTERPOLATION ---
         mats = np.array(sorted(self.yields.keys()))
         vals = np.array([self.yields[m] for m in mats])
         
@@ -103,23 +120,24 @@ class ImpliedDividendCurve:
 
     def to_dict(self):
         return {str(round(k, 4)): v for k, v in self.yields.items()}
-    
-# --- PART 3: DATA FETCHING & DYNAMIC SPOT ANCHOR ---
+
+# --- PART 4: DATA FETCHING ---
+
 def fetch_raw_data(ticker_symbol: str) -> pd.DataFrame:
-    """Parallel fetch of liquid monthly/quarterly contracts."""
+    """Parallel fetch of liquid monthly/quarterly contracts with settlement logic."""
     ticker = yf.Ticker(ticker_symbol)
-    today = datetime.now()
+    all_exps = ticker.options
     targets = [0.019, 0.08, 0.17, 0.25, 0.5, 0.75, 1.0, 1.25] 
     
     selected_exps = set()
-    all_exps = ticker.options
     for t in targets:
-        best = min(all_exps, key=lambda x: abs(((datetime.strptime(x, "%Y-%m-%d") - today).days / 365.25) - t))
+        best = min(all_exps, key=lambda x: abs(calculate_spx_time_to_maturity(datetime.strptime(x, "%Y-%m-%d")) - t))
         selected_exps.add(best)
 
     def fetch_one(exp_str):
         try:
-            T = (datetime.strptime(exp_str, "%Y-%m-%d") - today).days / 365.25
+            exp_dt = datetime.strptime(exp_str, "%Y-%m-%d")
+            T = calculate_spx_time_to_maturity(exp_dt)
             chain = ticker.option_chain(exp_str)
             df_c = chain.calls[['strike', 'bid', 'ask']].rename(columns={'strike':'STRIKE', 'bid':'bC', 'ask':'aC'})
             df_p = chain.puts[['strike', 'bid', 'ask']].rename(columns={'strike':'STRIKE', 'bid':'bP', 'ask':'aP'})
@@ -131,37 +149,11 @@ def fetch_raw_data(ticker_symbol: str) -> pd.DataFrame:
     with ThreadPoolExecutor(max_workers=8) as executor:
         results = list(executor.map(fetch_one, sorted(list(selected_exps))))
     return pd.concat([r for r in results if r is not None], ignore_index=True)
-def calculate_spx_time_to_maturity(expiry_date, is_am_settled=True):
-    """
-    Standardizes T for SPX AM vs PM settlement.
-    """
-    now = datetime.now()
-    
-    # 1. Define the exact settlement moment
-    if is_am_settled:
-        # Friday morning at 9:30 AM Eastern
-        expiry_settlement = datetime.combine(expiry_date, time(9, 30))
-    else:
-        # Friday afternoon at 4:00 PM Eastern (Weeklies)
-        expiry_settlement = datetime.combine(expiry_date, time(16, 0))
-    
-    # 2. Calculate T in years (Actual/365 or Actual/360 depending on your curve)
-    delta = expiry_settlement - now
-    t_seconds = delta.total_seconds()
-    
-    # If we are past settlement, T should be 0 (or handled as expired)
-    return max(t_seconds / (365 * 24 * 3600), 1e-6)
 
 def get_market_implied_spot(ticker_symbol: str, raw_df: pd.DataFrame, r_curve) -> float:
-    """
-    DERIVES THE SPOT ANCHOR FROM MARKET DATA.
-    Uses long-tenor stability to estimate the dividend baseline, then
-    synchronizes the 1-month forward to find the true spot.
-    """
     ticker = yf.Ticker(ticker_symbol)
     S_cash = ticker.fast_info['last_price']
     
-    # 1. Detect the current Market Baseline Yield from stable long tenors (T > 0.5)
     stable_Ts = sorted([t for t in raw_df['T'].unique() if t >= 0.5])
     baseline_qs = []
     
@@ -172,38 +164,35 @@ def get_market_implied_spot(ticker_symbol: str, raw_df: pd.DataFrame, r_curve) -
         reg = LinearRegression().fit(X, y)
         F_T = -reg.intercept_ / reg.coef_[0]
         r_T = r_curve.get_rate(T)
-        
-        # Estimate raw q relative to cash (low noise at T > 0.5)
         baseline_qs.append(r_T - np.log(F_T / S_cash) / T)
     
     market_baseline_q = np.median(baseline_qs) if baseline_qs else 0.013
     print(f"Detected Market Baseline q: {market_baseline_q:.4%}")
     
-    # 2. Use the 1-month pillar to find the synchronized Spot
     anchor_T = min(raw_df['T'].unique(), key=lambda x: abs(x - 0.0833))
     subset_anchor = raw_df[raw_df['T'] == anchor_T]
-    
     X_a = subset_anchor['STRIKE'].values.reshape(-1, 1)
     y_a = (subset_anchor['C_MID'] - subset_anchor['P_MID']).values
     reg_a = LinearRegression().fit(X_a, y_a)
     F_anchor = -reg_a.intercept_ / reg_a.coef_[0]
     r_anchor = r_curve.get_rate(anchor_T)
     
-    # Synchronized S0 = Forward / exp((r - baseline_q) * T)
-    # This aligns the Spot to the options plane using the baseline yield.
     S0_synchronized = F_anchor / np.exp((r_anchor - market_baseline_q) * anchor_T)
-    
     return float(S0_synchronized)
 
 def fetch_options(ticker_symbol: str, S0: float, target_size: int = 300) -> List[MarketOption]:
     ticker = yf.Ticker(ticker_symbol)
-    today = datetime.now()
-    # Filter for standard liquid maturities (>= 2 weeks)
-    valid_exps = [e for e in ticker.options if 0.04 <= (datetime.strptime(e, "%Y-%m-%d") - today).days/365.25 <= 1.3]
+    
+    valid_exps = []
+    for e in ticker.options:
+        t_val = calculate_spx_time_to_maturity(datetime.strptime(e, "%Y-%m-%d"))
+        if 0.04 <= t_val <= 1.3:
+            valid_exps.append(e)
     
     def process(exp_str):
         try:
-            T = (datetime.strptime(exp_str, "%Y-%m-%d") - today).days / 365.25
+            exp_dt = datetime.strptime(exp_str, "%Y-%m-%d")
+            T = calculate_spx_time_to_maturity(exp_dt)
             chain = ticker.option_chain(exp_str)
             local = []
             for opt_type, data, f in [('PUT', chain.puts, lambda k: k < S0), ('CALL', chain.calls, lambda k: k > S0)]:
