@@ -146,7 +146,7 @@ def print_curves(r_curve, q_curve):
 def main():
     FRED_API_KEY = os.getenv("FRED_API_KEY")
     target_date = datetime.now().strftime("%Y-%m-%d")
-    ticker = "^SPX"
+    ticker = "TSLA"
     print(f"Initializing Calibration for {ticker}...")
     r_curve = fetch_treasury_rates_fred(target_date, FRED_API_KEY)
     raw_df = fetch_raw_data(ticker)
