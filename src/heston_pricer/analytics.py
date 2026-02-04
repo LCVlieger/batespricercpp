@@ -15,80 +15,67 @@ def implied_volatility(price, S, K, T, r, q, option_type="CALL"):
     try: return brentq(bs_price, 0.001, 5.0)
     except: return 0.0
 class BatesAnalyticalPricer:
-    """
-    High-performance analytical pricer for European options using the Bates (1996) model.
-    Extends the Heston model with Merton Log-Normal Jumps.
-    """
-
     @staticmethod
     def price_vectorized(S0, K, T, r, q, types, kappa, theta, xi, rho, v0, lamb, mu_j, sigma_j):
-        """
-        Prices a mixed vector of Calls and Puts using Put-Call Parity.
-        K, T, r, q, and types must all be arrays of the same length.
-        """
-        # 1. Calculate everything as Calls first (Vectorized)
-        calls = BatesAnalyticalPricer.price_european_call_vectorized(
-            S0, K, T, r, q, kappa, theta, xi, rho, v0, lamb, mu_j, sigma_j
-        )
-        
-        # 2. Identify Puts
-        is_put = (types == "PUT")
-        
-        if np.any(is_put):
-            # Apply Put-Call Parity: P = C - S*e^-qT + K*e^-rT
-            puts = calls - S0 * np.exp(-q * T) + K * np.exp(-r * T)
-            return np.where(is_put, puts, calls)
-        
-        return calls
-
-    @staticmethod
-    def price_european_call_vectorized(S0, K, T, r, q, kappa, theta, xi, rho, v0, 
-                                       lamb, mu_j, sigma_j):
-        """
-        Vectorized Fourier integration engine for European Calls.
-        """
-        N_grid, u_max = 1000, 200.0
-        du = u_max / N_grid
-        u = np.linspace(1e-8, u_max, N_grid)[:, np.newaxis] 
+        # 1. UPGRADED RESOLUTION: 4000 points up to u=2500
+        N_grid, u_max = 4000, 2500.0 
+        u = np.linspace(0, u_max, N_grid + 1)[:, np.newaxis]
+        # We start at 0 but the integrand for P2 at u=0 is 0.5 (limit logic)
+        u[0] = 1e-10 
         
         K, T, r, q = np.atleast_1d(K), np.atleast_1d(T), np.atleast_1d(r), np.atleast_1d(q)
-        
-        T_mat = T[np.newaxis, :]
-        r_mat = r[np.newaxis, :]
-        q_mat = q[np.newaxis, :]
-        K_mat = K[np.newaxis, :]
+        T_mat, r_mat, q_mat, K_mat = T[np.newaxis,:], r[np.newaxis,:], q[np.newaxis,:], K[np.newaxis,:]
+        F_mat = S0 * np.exp((r_mat - q_mat) * T_mat)
 
         def get_cf(phi):
             xi_s = np.maximum(xi, 1e-6)
-            
-            # --- Heston Component ---
             d = np.sqrt((rho * xi_s * phi * 1j - kappa)**2 + xi_s**2 * (phi * 1j + phi**2))
             g = (kappa - rho * xi_s * phi * 1j - d) / (kappa - rho * xi_s * phi * 1j + d)
-            exp_neg_dT = np.exp(-d * T_mat)
-            
-            C = (1/xi_s**2) * ((1 - exp_neg_dT) / (1 - g * exp_neg_dT)) * (kappa - rho * xi_s * phi * 1j - d)
+            e_neg_dT = np.exp(-d * T_mat)
+            C = (1/xi_s**2) * ((1 - e_neg_dT) / (1 - g * e_neg_dT)) * (kappa - rho * xi_s * phi * 1j - d)
+            # Log Trap Fix
             D = (kappa * theta / xi_s**2) * ((kappa - rho * xi_s * phi * 1j - d) * T_mat - 
-                2 * (np.log(1 - g * exp_neg_dT) - np.log(1 - g + 1e-15)))
+                2 * np.log((1 - g * e_neg_dT) / (1 - g + 1e-15)))
             
-            # --- Bates Jump Component ---
+            # Bates Jumps
             k_bar = np.exp(mu_j + 0.5 * sigma_j**2) - 1
             e_i_phi_J = np.exp(1j * phi * mu_j - 0.5 * sigma_j**2 * phi**2)
             jump_part = lamb * T_mat * (e_i_phi_J - 1 - 1j * phi * k_bar)
+            return np.exp(C * v0 + D + 1j * phi * np.log(F_mat) + jump_part)
 
-            drift = 1j * phi * np.log(S0 * np.exp((r_mat - q_mat) * T_mat))
-            return np.exp(C * v0 + D + drift + jump_part)
-
-        cf_p1 = get_cf(u - 1j)
-        cf_p2 = get_cf(u)
+        cf_p1, cf_p2 = get_cf(u - 1j), get_cf(u)
         
-        int_p1 = np.real((np.exp(-1j * u * np.log(K_mat)) * cf_p1) / (1j * u * S0 * np.exp((r_mat - q_mat) * T_mat)))
+        # Integrands
+        int_p1 = np.real((np.exp(-1j * u * np.log(K_mat)) * cf_p1) / (1j * u * F_mat))
         int_p2 = np.real((np.exp(-1j * u * np.log(K_mat)) * cf_p2) / (1j * u))
+
+        # 2. SIMPSON'S RULE WEIGHTS (Much more accurate for steep slopes)
+        weights = np.ones(N_grid + 1)
+        weights[1:-1:2] = 4
+        weights[2:-2:2] = 2
+        weights = (weights * (u_max / N_grid) / 3.0)[:, np.newaxis]
+
+        # Integration
+        is_otm_call = (K_mat > F_mat)
+        P1_sum = np.sum(int_p1 * weights, axis=0)
+        P2_sum = np.sum(int_p2 * weights, axis=0)
         
-        P1 = 0.5 + (1/np.pi) * np.sum(int_p1 * du, axis=0)
-        P2 = 0.5 + (1/np.pi) * np.sum(int_p2 * du, axis=0)
+        P1 = np.where(is_otm_call, 0.5 + (1/np.pi) * P1_sum, 0.5 - (1/np.pi) * P1_sum)
+        P2 = np.where(is_otm_call, 0.5 + (1/np.pi) * P2_sum, 0.5 - (1/np.pi) * P2_sum)
         
-        price = S0 * np.exp(-q_mat * T_mat) * P1 - K_mat * np.exp(-r_mat * T_mat) * P2
-        return np.nan_to_num(np.maximum(price.flatten(), 0.0), nan=0.0)
+        price_otm = np.where(is_otm_call,
+                             S0 * np.exp(-q_mat * T_mat) * P1 - K_mat * np.exp(-r_mat * T_mat) * P2,
+                             K_mat * np.exp(-r_mat * T_mat) * P2 - S0 * np.exp(-q_mat * T_mat) * P1)
+        
+        # requested type conversion logic (unchanged)
+        res = price_otm.flatten()
+        is_put_req = (types == "PUT")
+        is_itm_req = (is_put_req != (~is_otm_call.flatten()))
+        if np.any(is_itm_req):
+            adj = S0 * np.exp(-q * T) - K * np.exp(-r * T)
+            res = np.where(is_put_req, np.where(~is_otm_call.flatten(), res, res - adj),
+                                       np.where(is_otm_call.flatten(), res, res + adj))
+        return np.nan_to_num(np.maximum(res, 0.0))
     
     @staticmethod
     def price_european_call(S0, K, T, r, q, kappa, theta, xi, rho, v0, lamb, mu_j, sigma_j):

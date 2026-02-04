@@ -40,7 +40,7 @@ def save_results(ticker, S0, r_curve, q_curve, res_ana, options):
     raw_weights = []
     for opt in options:
         spread = max(abs(opt.ask - opt.bid), 0.01)
-        raw_weights.append(1.0 / spread)
+        raw_weights.append(1.0) #/ spread)
     
     normalized_weights = np.array(raw_weights) / np.mean(raw_weights)
 
