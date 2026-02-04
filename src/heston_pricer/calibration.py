@@ -30,7 +30,7 @@ class BatesCalibrator:
     def _calculate_robust_weights(self, options, sigma_cap=2.0):
         """Calculates 1/spread weights capped at mean + n*sigma to handle outliers."""
         spreads = np.array([max(abs(o.ask - o.bid), 0.01) for o in options])
-        raw_weights = 1.0 / spreads
+        raw_weights = 1.0 #/ spreads
         
         mu = np.mean(raw_weights)
         std = np.std(raw_weights)
@@ -87,7 +87,7 @@ class BatesCalibrator:
             (-0.99, -0.3), # rho (Correlation - Locked negative for Equity Skew)
             (0.001, 0.5),  # v0 (Initial variance)
             (0.0, 5.0),    # lamb (Jump intensity)
-            (-0.5, 0.1),   # mu_j (Mean jump size)
+            (-0.5, 0.5),   # mu_j (Mean jump size)
             (0.01, 0.5)    # sigma_j (Jump volatility)
         ]
         

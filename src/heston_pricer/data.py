@@ -8,9 +8,14 @@ import yfinance as yf
 from datetime import datetime, timedelta, time as dt_time
 from dataclasses import dataclass
 from typing import List, Dict
-from scipy.interpolate import PchipInterpolator, interp1d
+from scipy.interpolate import interp1d
 from sklearn.linear_model import LinearRegression
 from concurrent.futures import ThreadPoolExecutor
+
+# --- CONFIGURATION: THE BOX SPREAD ---
+# SPX options trade on a rate higher than Treasuries (Box Spread/SOFR).
+# Currently, this spread is approximately 40-50 basis points (0.0045).
+BOX_SPREAD = 0.0045
 
 @dataclass
 class MarketOption:
@@ -23,10 +28,14 @@ class MarketOption:
 
 # --- PART 1: RATE ENGINE ---
 class NSSYieldCurve:
-    def __init__(self, curve_fit):
+    def __init__(self, curve_fit, spread=0.0):
         self.curve = curve_fit
+        self.spread = spread
+
     def get_rate(self, T: float) -> float:
-        return float(self.curve(max(T, 1e-4)))
+        """Returns the Treasury rate plus the Box Spread adjustment."""
+        return float(self.curve(max(T, 1e-4))) + self.spread
+
     def to_dict(self):
         return {f"{round(t,3)}Y": self.get_rate(t) for t in [0.08, 0.25, 0.5, 1.0]}
 
@@ -48,7 +57,8 @@ def fetch_treasury_rates_fred(date_str: str, api_key: str) -> NSSYieldCurve:
         if len(mats) >= 3:
             from nelson_siegel_svensson.calibrate import calibrate_nss_ols
             curve_fit, _ = calibrate_nss_ols(np.array(mats), np.array(yields))
-            return NSSYieldCurve(curve_fit)
+            # Initialize with the global BOX_SPREAD adjustment
+            return NSSYieldCurve(curve_fit, spread=BOX_SPREAD)
     raise ValueError("Could not fetch FRED rates.")
 
 # --- PART 2: SETTLEMENT & TIME ENGINE ---
@@ -58,25 +68,14 @@ def is_third_friday(d: datetime) -> bool:
     return d.weekday() == 4 and 15 <= d.day <= 21
 
 def calculate_spx_time_to_maturity(expiry_date: datetime) -> float:
-    """
-    Standardizes T for SPX AM vs PM settlement.
-    Monthly (3rd Friday) expires Friday AM at 9:30 ET.
-    Weekly/Daily expires Friday PM at 16:00 ET.
-    """
+    """Standardizes T for SPX AM vs PM settlement."""
     now = datetime.now()
-    
     if is_third_friday(expiry_date):
-        # Standard Monthly: AM Settled
         expiry_settlement = datetime.combine(expiry_date.date(), dt_time(9, 30))
     else:
-        # Weeklies/Daily: PM Settled
         expiry_settlement = datetime.combine(expiry_date.date(), dt_time(16, 0))
-    
     delta = expiry_settlement - now
-    # 365.25 to account for leap years in professional calendars
-    seconds_in_year = 365.25 * 24 * 3600
-    
-    return max(delta.total_seconds() / seconds_in_year, 1e-6)
+    return max(delta.total_seconds() / (365.25 * 24 * 3600), 1e-6)
 
 # --- PART 3: DIVIDEND ENGINE ---
 
@@ -90,6 +89,7 @@ class ImpliedDividendCurve:
             atm_idx = (subset['STRIKE'] - S0_anchor).abs().idxmin()
             atm_opt = subset.loc[atm_idx]
             
+            # r_curve.get_rate(T) already includes the BOX_SPREAD
             r = r_curve.get_rate(T)
             C, P, K = atm_opt['C_MID'], atm_opt['P_MID'], atm_opt['STRIKE']
             
@@ -101,7 +101,8 @@ class ImpliedDividendCurve:
             else:
                 q_sync = 0.0
             
-            self.yields[T] = float(np.clip(q_sync, -0.15, 0.15))
+            # Clip to realistic equity dividend bounds (usually 1%-3%)
+            self.yields[T] = float(np.clip(q_sync, -0.05, 0.10))
 
         mats = np.array(sorted(self.yields.keys()))
         vals = np.array([self.yields[m] for m in mats])
@@ -111,11 +112,10 @@ class ImpliedDividendCurve:
                                      fill_value=(vals[0], vals[-1]))
         
         self.min_T, self.max_T = mats[0], mats[-1]
-        self.val_min, self.val_max = vals[0], vals[-1]
 
     def get_rate(self, T: float) -> float:
-        if T < self.min_T: return float(self.val_min)
-        if T > self.max_T: return float(self.val_max)
+        if T < self.min_T: return float(self.yields[self.min_T])
+        if T > self.max_T: return float(self.yields[self.max_T])
         return float(self.interpolator(T))
 
     def to_dict(self):
@@ -124,7 +124,6 @@ class ImpliedDividendCurve:
 # --- PART 4: DATA FETCHING ---
 
 def fetch_raw_data(ticker_symbol: str) -> pd.DataFrame:
-    """Parallel fetch of liquid monthly/quarterly contracts with settlement logic."""
     ticker = yf.Ticker(ticker_symbol)
     all_exps = ticker.options
     targets = [0.019, 0.08, 0.17, 0.25, 0.5, 0.75, 1.0, 1.25] 
@@ -163,26 +162,24 @@ def get_market_implied_spot(ticker_symbol: str, raw_df: pd.DataFrame, r_curve) -
         y = (subset['C_MID'] - subset['P_MID']).values
         reg = LinearRegression().fit(X, y)
         F_T = -reg.intercept_ / reg.coef_[0]
-        r_T = r_curve.get_rate(T)
+        r_T = r_curve.get_rate(T) # Higher market rate
         baseline_qs.append(r_T - np.log(F_T / S_cash) / T)
     
     market_baseline_q = np.median(baseline_qs) if baseline_qs else 0.013
-    print(f"Detected Market Baseline q: {market_baseline_q:.4%}")
     
     anchor_T = min(raw_df['T'].unique(), key=lambda x: abs(x - 0.0833))
     subset_anchor = raw_df[raw_df['T'] == anchor_T]
-    X_a = subset_anchor['STRIKE'].values.reshape(-1, 1)
-    y_a = (subset_anchor['C_MID'] - subset_anchor['P_MID']).values
-    reg_a = LinearRegression().fit(X_a, y_a)
+    reg_a = LinearRegression().fit(subset_anchor['STRIKE'].values.reshape(-1, 1), 
+                                   (subset_anchor['C_MID'] - subset_anchor['P_MID']).values)
     F_anchor = -reg_a.intercept_ / reg_a.coef_[0]
     r_anchor = r_curve.get_rate(anchor_T)
     
+    # Synchronization using market-consistent rates ensures S0 is spot-on
     S0_synchronized = F_anchor / np.exp((r_anchor - market_baseline_q) * anchor_T)
     return float(S0_synchronized)
 
 def fetch_options(ticker_symbol: str, S0: float, target_size: int = 300) -> List[MarketOption]:
     ticker = yf.Ticker(ticker_symbol)
-    
     valid_exps = []
     for e in ticker.options:
         t_val = calculate_spx_time_to_maturity(datetime.strptime(e, "%Y-%m-%d"))
