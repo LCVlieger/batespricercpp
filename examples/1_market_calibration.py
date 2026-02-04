@@ -117,7 +117,7 @@ def print_curves(r_curve, q_curve):
 def main():
     FRED_API_KEY = os.getenv("FRED_API_KEY")
     target_date = datetime.now().strftime("%Y-%m-%d")
-    ticker = "^SPX"
+    ticker = "NVDA" #"^SPX"
     
     print(f"Initializing Bates Calibration for {ticker}...")
     
