@@ -7,6 +7,7 @@ from matplotlib import cm
 import glob
 import os
 from matplotlib.transforms import Bbox
+import matplotlib.patheffects as path_effects
 
 def visualize_price_surface_final(csv_file):
     """
@@ -69,7 +70,7 @@ def visualize_price_surface_final(csv_file):
         df['Moneyness'], df['T'], df['Market'], 
         color='r', 
         s=13, 
-        label='Market Prices', 
+        label='Market Price', 
         depthshade=False
     )
 
@@ -81,10 +82,10 @@ def visualize_price_surface_final(csv_file):
     # bbox_to_anchor=(0.157, 0.797)
     ax.legend(
         loc='upper left', 
-        bbox_to_anchor=(0.157, 0.797), 
+        bbox_to_anchor=(0.131, 0.81), 
         frameon=False, 
         labelcolor="black", 
-        fontsize=10,
+        fontsize=11,
     )
 
     # 4. TITLES (With FULL Bates Parameters)
@@ -99,15 +100,17 @@ def visualize_price_surface_final(csv_file):
     sigma_j = params.get('sigma_j', 0.0)
 
     # Main Title (Coordinate: 0.535, 0.84)
-    fig.text(0.5975, 0.85, f"Bates Calibration Price Surface: {ticker}", 
-             fontsize=16, fontweight='bold', family='monospace', ha='center', color='black')
-    
+    text_obj = fig.text(0.5897125, 0.843, f"Bates Calibration Price Surface: {ticker}", 
+             fontsize=18, fontweight='bold', family='monospace', ha='center', color='black')
+    text_obj.set_path_effects([
+    path_effects.withStroke(linewidth=0.5, foreground='black')
+])
     # Subtitle (Two lines to fit all parameters + S0)
     # Coordinate: 0.535, 0.79
     subtitle = (rf"$\kappa={kappa:.2f}, \theta={theta:.2f}, \xi={xi:.2f}, \rho={rho:.2f}, v_0={v0:.3f}$" + "\n" +
                 rf"$\lambda={lamb:.2f}, \mu_J={mu_j:.2f}, \sigma_J={sigma_j:.2f}, S_0={s0:.1f}$")
     
-    fig.text(0.5975, 0.80, subtitle, fontsize=9, family='monospace', ha='center', color='#555555')
+    fig.text(0.581575, 0.7989, subtitle, fontsize=10, family='monospace', ha='center', color='#555555')
 
     # 5. STYLING & FONTS
     # Transparent panes
@@ -137,7 +140,7 @@ def visualize_price_surface_final(csv_file):
     # TILT: Lowered to 22 (from 30)
     #ax.view_init(elev=19.7, azim=-119)
     ax.view_init(elev=30, azim=-120)
-
+    #ax.view_init(elev=22, azim=-125)
     # Tight layout logic
     fig.subplots_adjust(left=0.25, bottom=0.05, right=0.95, top=0.85)
 
@@ -155,6 +158,7 @@ def visualize_price_surface_final(csv_file):
     save_path = csv_file.replace(".csv", "_price_surface_final.png")
     plt.savefig(save_path, dpi=300, bbox_inches=bbox_shifted)
     print(f"-> Saved: {save_path}")
+    #plt.show()
 
 # --- Run ---
 files = glob.glob("results/calibration_*_prices.csv")
