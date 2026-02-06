@@ -92,7 +92,7 @@ class BatesCalibrator:
         ]
         
         # Initial Guess: Standard Heston + Moderate Jumps
-        x0 = [3.2, 0.040, 0.82, -0.74, 0.022, 0.0376, -0.47, 0.37] #[2.0, 0.04, 0.6, -0.7, 0.04, 0.1, -0.1, 0.1]
+        x0 = [2.0, 0.04, 0.6, -0.7, 0.04, 0.1, -0.1, 0.1] #[3.2, 0.040, 0.82, -0.74, 0.022, 0.0376, -0.47, 0.37] #
         def objective(p):
             try:
                 kappa, theta, xi, rho, v0, lamb, mu_j, sigma_j = p

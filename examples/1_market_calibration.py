@@ -12,7 +12,9 @@ from heston_pricer.data import (
     fetch_raw_data, 
     fetch_options, 
     get_market_implied_spot, 
-    ImpliedDividendCurve
+    ImpliedDividendCurve,
+    save_options_to_cache,
+    load_options_from_cache
 )
 
 # =================================================================
@@ -122,13 +124,31 @@ def print_curves(r_curve, q_curve):
 def main():
     FRED_API_KEY = os.getenv("FRED_API_KEY")
     target_date = datetime.now().strftime("%Y-%m-%d")
-    ticker = "SPY" #"^SPX"
+    ticker = "TSLA" #all work: "AAPL" #"^SPX"
     
     print(f"Initializing Bates Calibration for {ticker}...")
     
     # 1. Data Fetching
     # r_curve now automatically adds the BOX_SPREAD in data.py
+    cache_file = None 
+
+    # 1. Data Fetching
     r_curve = fetch_treasury_rates_fred(target_date, FRED_API_KEY)
+    
+    if cache_file and os.path.exists(cache_file):
+        print(f"Loading cached data from {cache_file}...")
+        options_processed = load_options_from_cache(cache_file)
+        # Note: You still need a S0. You can either save S0 in the JSON 
+        # or fetch the historical close for that specific date.
+        S0_actual = 190.45 # Example: replace with actual saved value
+    else:
+        raw_df = fetch_raw_data(ticker)
+        S0_actual = get_market_implied_spot(ticker, raw_df, r_curve)
+        options_processed = fetch_options(ticker, S0_actual, target_size=150)
+        
+        # SAVE IT FOR TOMORROW
+        save_options_to_cache(options_processed, ticker)
+        
     raw_df = fetch_raw_data(ticker)
     
     # S0_actual uses the higher r_curve to synchronize correctly
@@ -139,7 +159,7 @@ def main():
     print_curves(r_curve, q_curve)
     
     # options_processed no longer contains the .forward field
-    options_processed = fetch_options(ticker, S0_actual, target_size=150)
+    options_processed = fetch_options(ticker, S0_actual, target_size=300)
     print(f"Processing {len(options_processed)} standard OTM options...")
     
     # 3. Calibration

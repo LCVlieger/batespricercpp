@@ -7,6 +7,7 @@ import requests
 import yfinance as yf
 from datetime import datetime, timedelta, time as dt_time
 from dataclasses import dataclass
+from dataclasses import asdict
 from typing import List, Dict
 from scipy.interpolate import interp1d
 from sklearn.linear_model import LinearRegression
@@ -26,6 +27,26 @@ class MarketOption:
     bid: float = 0.0
     ask: float = 0.0
     spread: float = 0.0 # Capture real spread for CSV/Weights
+
+def save_options_to_cache(options: List[MarketOption], ticker: str):
+    """Saves the list of MarketOption objects to a JSON file."""
+    os.makedirs("cache", exist_ok=True)
+    filename = f"cache/options_{ticker}_{datetime.now().strftime('%Y%m%d')}.json"
+    
+    # Convert dataclasses to dictionaries for JSON serialization
+    data_to_save = [asdict(o) for o in options]
+    
+    with open(filename, "w") as f:
+        json.dump(data_to_save, f, indent=4)
+    print(f"Successfully cached {len(options)} options to {filename}")
+    return filename
+
+def load_options_from_cache(filepath: str) -> List[MarketOption]:
+    """Loads options from a previously saved JSON file."""
+    with open(filepath, "r") as f:
+        data = json.load(f)
+    
+    return [MarketOption(**item) for item in data]
 
 # --- PART 1: RATE ENGINE ---
 class NSSYieldCurve:

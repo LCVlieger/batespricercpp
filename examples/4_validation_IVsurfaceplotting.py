@@ -249,7 +249,7 @@ def plot_surface_professional(S0, r_curve, q_curve, params, ticker, filename, ma
                 # but usually they are at the top of 'analytical'
         except Exception:
             pass    
-        s0 = 6898.4
+        s0 = 0
         # --- TITLES ---
         model_name = "Bates" if is_bates else "Heston"
         fig.text(0.535, 0.84, rf"{model_name} Implied Volatility Surface: {ticker}", 
