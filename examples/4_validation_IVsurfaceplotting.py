@@ -109,13 +109,12 @@ def select_best_parameters(data):
 
     score_ana = get_score(res_ana)
     score_mc = get_score(res_mc)
-
     if score_mc < score_ana:
         print(f"\n[Selection] Monte Carlo Win (Err: {score_mc:.4f} < Ana: {score_ana:.4f})")
-        return res_ana, "Monte Carlo"
-    elif score_ana < float('inf'):
+        return res_mc, "Monte Carlo"
+    elif res_mc < float('inf'):
         print(f"\n[Selection] Analytical Win (Err: {score_ana:.4f} < MC: {score_mc:.4f})")
-        return res_ana, "Analytical"
+        return res_mc, "Analytical"
     else:
         print("\n[Selection] No valid results found. Using default guess.")
         return {'kappa':2.0, 'theta':0.04, 'xi':0.5, 'rho':-0.7, 'v0':0.04}, "Default"

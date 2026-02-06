@@ -18,74 +18,79 @@ from heston_pricer.data import (
 # =================================================================
 # 3. SAVING & VALIDATION 
 # =================================================================
-def save_results(ticker, S0, r_curve, q_curve, res_ana, options):
+def save_results(ticker, S0, r_curve, q_curve, res_params, options, mc_calibrator):
     os.makedirs("results", exist_ok=True)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    base_name = f"results/calibration_{ticker}_{timestamp}"
+    base_name = f"results/calibration_MC_{ticker}_{timestamp}"
     
     tenors = [(0.02, "1 week"), (0.04, "2 weeks"), (0.0833, "1 Month"), (0.25, "3 Months"), (0.5, "6 Months"), (1.0, "1 Year")]
     r_sample = {f"{t:.4f}Y": float(r_curve.get_rate(t)) for t, label in tenors}
     q_sample = {f"{t:.4f}Y": float(q_curve.get_rate(t)) for t, label in tenors}
     
-    print(f"\n[Validation] Re-pricing {len(options)} instruments using Adjusted Market Rates...")
-    
-    # --- 1. PRE-COMPUTE WEIGHTS ---
+    print(f"\n[Validation] Re-pricing {len(options)} instruments using Final MC Parameters...")
+
+    # 1. Weights for RMSE calculation (1.0 to match your analytical file)
     raw_weights = [1.0 for _ in options]
     normalized_weights = np.array(raw_weights) / np.mean(raw_weights)
 
-    # --- 2. CALCULATE EXACT ANALYTICAL PRICES & ERRORS ---
-    rows = []
-    def get_p(res): 
-        keys = ['kappa', 'theta', 'xi', 'rho', 'v0', 'lamb', 'mu_j', 'sigma_j']
-        return [res[k] for k in keys]
+    # 2. Extract Parameter Values
+    keys = ['kappa', 'theta', 'xi', 'rho', 'v0', 'lamb', 'mu_j', 'sigma_j']
+    if isinstance(res_params, dict):
+        p_values = [res_params[k] for k in keys]
+    else:
+        p_values = list(res_params.x)
 
-    p_ana_params = get_p(res_ana)
-    weighted_sq_err_ana = []
+    # 3. Final High-Precision Pass
+    mc_calibrator.n_paths = 50000 
+    mc_calibrator._precompute(options) 
+    model_prices, _, _ = mc_calibrator.get_prices(p_values)
+
+    rows = []
+    weighted_sq_err = []
     
-    # TRADITIONAL VECTORIZATION: Uses S0, r_vec, and q_vec
     strikes = np.array([o.strike for o in options])
     mats = np.array([o.maturity for o in options])
-    types = np.array([o.option_type for o in options])
     r_vec = np.array([r_curve.get_rate(t) for t in mats])
     q_vec = np.array([q_curve.get_rate(t) for t in mats])
-
-    # Price using the adjusted curves from data.py
-    model_prices = BatesAnalyticalPricer.price_vectorized(
-        S0, strikes, mats, r_vec, q_vec, types, *p_ana_params
-    )
 
     for i, opt in enumerate(options):
         r, q = r_vec[i], q_vec[i]
         model_p = model_prices[i]
-        err_ana = model_p - opt.market_price
-        weighted_sq_err_ana.append((err_ana * normalized_weights[i])**2)
+        err = model_p - opt.market_price
+        weighted_sq_err.append((err * normalized_weights[i])**2)
         
-        # Calculate IV using the same r and q used for pricing
-        iv_mkt = implied_volatility(opt.market_price, S0, opt.strike, opt.maturity, r, q, opt.option_type)
-        iv_model = implied_volatility(model_p, S0, opt.strike, opt.maturity, r, q, opt.option_type)
+        try:
+            iv_mkt = implied_volatility(opt.market_price, S0, opt.strike, opt.maturity, r, q, opt.option_type)
+            iv_model = implied_volatility(model_p, S0, opt.strike, opt.maturity, r, q, opt.option_type)
+        except:
+            iv_mkt, iv_model = 0.0, 0.0
         
         rows.append({
-            "T": round(opt.maturity, 3), 
-            "K": opt.strike, 
-            "Type": opt.option_type,
-            "Market": round(opt.market_price, 2),
-            "Model": round(model_p, 2), 
-            "Err": round(err_ana, 2),
-            "IV_Mkt": round(iv_mkt, 4),
-            "IV_Model": round(iv_model, 4)
+            "T": round(opt.maturity, 3), "K": opt.strike, "Type": opt.option_type,
+            "Market": round(opt.market_price, 2), "Model": round(model_p, 2), 
+            "Err": round(err, 2), "IV_Mkt": round(iv_mkt, 4), "IV_Model": round(iv_model, 4)
         })
 
     df = pd.DataFrame(rows)
     df.to_csv(f"{base_name}_prices.csv", index=False)
     
-    rmse_ana = np.sqrt((df["Err"]**2).mean())
-    w_obj_ana = np.sqrt(np.mean(weighted_sq_err_ana))
+    # --- METRICS CALCULATION ---
+    rmse_val = float(np.sqrt((df["Err"]**2).mean()))
+    weighted_obj_val = float(np.sqrt(np.mean(weighted_sq_err)))
+
+    # --- JSON CONSTRUCTION (Injected with scoring keys) ---
+    # We use 'analytical' as the key so the plotter can find it easily
+    res_dict = dict(zip(keys, p_values))
+    res_dict['weighted_obj'] = weighted_obj_val
+    res_dict['rmse'] = rmse_val
 
     meta = {
-        "model": "Bates",
+        "model": "Bates_MC",
         "market": {"S0": S0, "r_sample": r_sample, "q_sample": q_sample},
-        "analytical": res_ana,
+        "analytical": res_dict, # Using 'analytical' key for plotter compatibility
+        "notes": "Calibrated directly via Monte Carlo"
     }
+    
     with open(f"{base_name}_meta.json", "w") as f:
         json.dump(meta, f, indent=4)
     
@@ -94,13 +99,10 @@ def save_results(ticker, S0, r_curve, q_curve, res_ana, options):
     print("-" * 80)
     print(df.head(10).to_string(index=False))
     print("-" * 80)
-    
-    mean_price = df["Market"].mean()
-    print(f"Analytical RMSE: {rmse_ana:.4f} ({rmse_ana/mean_price:.2%} of avg price)")
-    print(f"Weighted Objective: {w_obj_ana:.4f}")
+    print(f"Final MC RMSE: {rmse_val:.4f} | Weighted Obj: {weighted_obj_val:.4f}")
     print("="*80)
     print(f"Saved results to: {base_name}_prices.csv")
-
+    
 def print_curves(r_curve, q_curve):
     print("\n" + "="*60)
     print(f"{'Tenor':<10} | {'Market Rate (r)':<15} | {'Div Yield (q)':<15}")

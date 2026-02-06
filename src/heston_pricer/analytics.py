@@ -24,7 +24,7 @@ class BatesAnalyticalPricer:
     @staticmethod
     def price_vectorized(S0, K, T, r, q, types, kappa, theta, xi, rho, v0, lamb, mu_j, sigma_j):
         # 1. UPGRADED RESOLUTION: 8000 points up to u=10000
-        N_grid, u_limit = 8000, 10000.0 
+        N_grid, u_limit = 8000, 10000.0  #8000, 10000.0
         
         # Quadratic grid to pack points near the u=0 singularity
         u_linear = np.linspace(0, 1, N_grid + 1)

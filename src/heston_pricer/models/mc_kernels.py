@@ -94,3 +94,96 @@ def generate_heston_paths_crn(S0, r, q, v0, kappa, theta, xi, rho, T, n_paths, n
         prices[:, j + 1] = curr_s
         
     return prices
+
+@jit(nopython=True, cache=True, fastmath=True)
+def generate_bates_paths(S0, r, q, v0, kappa, theta, xi, rho, lamb, mu_j, sigma_j, T, n_paths, n_steps):
+    """
+    Bates Model (Heston + Merton Jump Diffusion) simulation.
+    Uses Poisson-Gaussian jumps.
+    """
+    dt = T / n_steps
+    sqrt_dt = np.sqrt(dt)
+    c1, c2 = rho, np.sqrt(1 - rho**2)
+    
+    # Expected relative jump size (compensator for drift)
+    k = np.exp(mu_j + 0.5 * sigma_j**2) - 1
+    drift_correction = lamb * k
+    
+    prices = np.zeros((n_paths, n_steps + 1))
+    prices[:, 0] = S0
+    
+    curr_v = np.full(n_paths, v0)
+    curr_s = np.full(n_paths, S0)
+    
+    for j in range(n_steps):
+        Z1 = np.random.standard_normal(n_paths)
+        Z2 = np.random.standard_normal(n_paths)
+        Zv = c1 * Z1 + c2 * Z2
+        
+        # --- JUMP COMPONENT ---
+        # Number of jumps in this step (Poisson)
+        # Note: For small lambda*dt, this is mostly 0 or 1.
+        N_jumps = np.random.poisson(lamb * dt, n_paths)
+        
+        # Total Log-Jump size: Sum of N normals -> N(N*mu, N*sigma^2)
+        # We simulate this by scaling a single standard normal by sqrt(N)
+        Z_jump = np.random.standard_normal(n_paths)
+        
+        # Avoid sqrt(0) warnings/errors implicitly by multiplication (or masking if strictly needed)
+        # N_jumps is integer, so we cast to float for sqrt
+        jump_magnitude = N_jumps * mu_j + np.sqrt(N_jumps) * sigma_j * Z_jump
+        
+        # --- HESTON UPDATE ---
+        v_t = np.maximum(curr_v, 0.0)
+        
+        # Asset Update:
+        # drift = r - q - 0.5*v_t - lambda*k
+        drift_term = (r - q - 0.5 * v_t - drift_correction) * dt
+        diff_term = np.sqrt(v_t) * sqrt_dt * Z1
+        
+        curr_s *= np.exp(drift_term + diff_term + jump_magnitude)
+        
+        # Variance Update (Standard Heston)
+        curr_v += kappa * (theta - v_t) * dt + xi * np.sqrt(v_t) * sqrt_dt * Zv
+        
+        prices[:, j + 1] = curr_s
+        
+    return prices
+
+@jit(nopython=True, cache=True, fastmath=True)
+def generate_bates_paths_crn(S0, r, q, v0, kappa, theta, xi, rho, lamb, mu_j, sigma_j, T, n_paths, n_steps, noise_matrix):
+    dt = T / n_steps
+    sqrt_dt = np.sqrt(dt)
+    c1, c2 = rho, np.sqrt(1 - rho**2)
+    k = np.exp(mu_j + 0.5 * sigma_j**2) - 1
+    drift_correction = lamb * k
+    
+    prices = np.zeros((n_paths, n_steps + 1))
+    prices[:, 0] = S0
+    curr_v = np.full(n_paths, v0)
+    curr_s = np.full(n_paths, S0)
+    jump_prob = lamb * dt
+    
+    for j in range(n_steps):
+        # Force 1D slicing for Numba broadcasting
+        Z1 = noise_matrix[0, j, :n_paths] 
+        Z2 = noise_matrix[1, j, :n_paths]
+        U_jump = noise_matrix[2, j, :n_paths] 
+        Z_size = noise_matrix[3, j, :n_paths]
+        
+        Zv = c1 * Z1 + c2 * Z2
+        v_t = np.maximum(curr_v, 0.0)
+        
+        # Vectorized jump logic
+        jump_mag = np.where(U_jump < jump_prob, mu_j + sigma_j * Z_size, 0.0)
+        
+        # Asset Update
+        drift_term = (r - q - 0.5 * v_t - drift_correction) * dt
+        diff_term = np.sqrt(v_t) * sqrt_dt * Z1
+        curr_s *= np.exp(drift_term + diff_term + jump_mag)
+        
+        # Variance Update
+        curr_v += kappa * (theta - v_t) * dt + xi * np.sqrt(v_t) * sqrt_dt * Zv
+        prices[:, j + 1] = curr_s
+        
+    return prices
