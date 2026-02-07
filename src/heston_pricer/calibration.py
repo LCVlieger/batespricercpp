@@ -75,7 +75,6 @@ class BatesCalibrator:
             vegas.append(robust_vega)
         
         vegas = np.array(vegas)
-        
         # Spread weights help ignore noisy data, Vega weights help fit the smile.
         spread_weights = self._calculate_robust_weights(options, sigma_cap)
 
@@ -84,7 +83,7 @@ class BatesCalibrator:
             (0.1, 10.0),   # kappa (Speed of mean reversion)
             (0.001, 0.5),  # theta (Long run variance)
             (0.01, 5.0),   # xi (Vol of Vol - allow high values for steep smile)
-            (-0.99, -0.3), # rho (Correlation - Locked negative for Equity Skew)
+            (-0.99, 0.0), # rho (Correlation - Locked negative for Equity Skew)
             (0.001, 0.5),  # v0 (Initial variance)
             (0.0, 5.0),    # lamb (Jump intensity)
             (-0.5, 0.5),   # mu_j (Mean jump size)
@@ -108,9 +107,10 @@ class BatesCalibrator:
                 # VEGA-WEIGHTED ERROR: (Price_Diff / Vega) ~ Vol_Diff
                 # This approximates minimizing the RMSE of Implied Volatility
                 raw_diff = (model_p - market_prices)
-                
+                spreads2 = np.array([max(abs(o.ask - o.bid), 0.01) for o in options])
                 # We combine spread weights (trustworthiness) with Vega weights (importance)
-                weighted_diff = (raw_diff * spread_weights) # raw_diff / (vegas + 1e-4)) * spread_weights
+                lambda_floor = 0.05 * np.mean(list(atm_vega_map.values()))
+                weighted_diff = raw_diff / (raw_diff * spread_weights) #weighted_diff = raw_diff / (vegas + lambda_floor) #+ spreads2)#(raw_diff * spread_weights) ## raw_diff / (vegas + 1e-4)) * spread_weights
                 
                 return np.sqrt(np.mean(weighted_diff**2)) 
             except: 

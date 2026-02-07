@@ -100,7 +100,7 @@ def visualize_price_surface_final(csv_file):
     sigma_j = params.get('sigma_j', 0.0)
 
     # Main Title (Coordinate: 0.535, 0.84)
-    text_obj = fig.text(0.5897125, 0.843, f"Bates Calibration Price Surface: {ticker}", 
+    text_obj = fig.text(0.5897125, 0.843, f"Bates Calibration Price Surface: AAPL", 
              fontsize=18, fontweight='bold', family='monospace', ha='center', color='black')
     text_obj.set_path_effects([
     path_effects.withStroke(linewidth=0.5, foreground='black')
@@ -164,7 +164,8 @@ def visualize_price_surface_final(csv_file):
 files = glob.glob("results/calibration_*_prices.csv")
 if files:
     # Pick the latest file
-    latest_file = max(files, key=os.path.getctime)
+    files_sorted = sorted(files, key=os.path.getctime, reverse=True)
+    latest_file = files_sorted[1]#max(files, key=os.path.getctime)
     visualize_price_surface_final(latest_file)
 else:
     print("No calibration files found.")

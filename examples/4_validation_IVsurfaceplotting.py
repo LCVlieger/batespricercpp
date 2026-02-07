@@ -70,8 +70,8 @@ def load_latest_calibration():
     for p in patterns: files.extend(glob.glob(p))
     
     if not files: raise FileNotFoundError("No calibration meta file found.")
-    
-    latest_meta = max(files, key=os.path.getctime)
+    files_sorted = sorted(files, key=os.path.getctime)
+    latest_meta = files_sorted[1] # max(files, key=os.path.getctime)
     base_name = latest_meta.replace("_meta.json", "")
     print(f"Loading Artifact: {base_name}...")
     
@@ -119,7 +119,7 @@ def plot_surface_professional(S0, r_curve, q_curve, params, ticker, filename, ma
     is_bates = lamb > 0.0
 
     # --- 1. CONFIGURATION ---
-    LOWER_M, UPPER_M = 0.7, 1.3 
+    LOWER_M, UPPER_M = 0.685, 1.315 
     LOWER_T, UPPER_T = 0.04, 1.5 
     GRID_DENSITY = 100 # 100 is smoother but slower
 
@@ -231,9 +231,10 @@ def plot_surface_professional(S0, r_curve, q_curve, params, ticker, filename, ma
         ax.grid(True, color='gray', linestyle=':', linewidth=0.5, alpha=0.3)
         ax.view_init(elev=28, azim=-115) 
         files = glob.glob("results/calibration_*_prices.csv")
+        files_sorted = sorted(files, key=os.path.getctime)
         if files:
             # Pick the latest file
-            latest_file = max(files, key=os.path.getctime)
+            latest_file = files_sorted[1] #max(files, key=os.path.getctime)
         csv_file = pd.read_csv(latest_file)
         base_name = csv_file.replace("_prices.csv", "")
         json_file = f"{base_name}_meta.json"
@@ -252,7 +253,7 @@ def plot_surface_professional(S0, r_curve, q_curve, params, ticker, filename, ma
         s0 = 0
         # --- TITLES ---
         model_name = "Bates" if is_bates else "Heston"
-        fig.text(0.535, 0.84, rf"{model_name} Implied Volatility Surface: {ticker}", 
+        fig.text(0.535, 0.84, rf"{model_name} Implied Volatility Surface: AAPL", 
                  color='white', fontsize=16, fontweight='bold', family='monospace', ha='center')
         
         if is_bates:
