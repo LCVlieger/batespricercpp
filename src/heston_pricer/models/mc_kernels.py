@@ -155,34 +155,60 @@ def generate_bates_paths_crn(S0, r, q, v0, kappa, theta, xi, rho, lamb, mu_j, si
     sqrt_dt = np.sqrt(dt)
     c1, c2 = rho, np.sqrt(1 - rho**2)
     
-    # Calculate Compensator Internally
+    # 1. CORRECT COMPENSATOR (Poisson-based)
+    # This is the expected jump in price space: E[exp(J) - 1]
     k_bar = np.exp(mu_j + 0.5 * sigma_j**2) - 1
     drift_correction = lamb * k_bar
-    jump_prob = lamb * dt
 
     prices = np.zeros((n_paths, n_steps + 1))
     prices[:, 0] = S0
     curr_v = np.full(n_paths, v0)
     curr_s = np.full(n_paths, S0)
     
+    # Pre-calculate common scalars
+    lam_dt = lamb * dt
+    exp_neg_lam = np.exp(-lam_dt)
+    
     for j in range(n_steps):
-        Z1 = noise_matrix[0, j, :n_paths] 
-        Z2 = noise_matrix[1, j, :n_paths]
-        U_jump = noise_matrix[2, j, :n_paths] 
-        Z_size = noise_matrix[3, j, :n_paths]
+        # Extract noise for this time step
+        Z1_row = noise_matrix[0, j, :n_paths] 
+        Z2_row = noise_matrix[1, j, :n_paths]
+        U_jump_row = noise_matrix[2, j, :n_paths] 
+        Z_size_row = noise_matrix[3, j, :n_paths]
         
-        Zv = c1 * Z1 + c2 * Z2
+        # Heston updates
+        Zv_row = c1 * Z1_row + c2 * Z2_row
         v_t = np.maximum(curr_v, 0.0)
         
-        jump_mag = np.where(U_jump < jump_prob, mu_j + sigma_j * Z_size, 0.0)
+        # Drift & Diffusion components (Log-Euler)
+        # Note: r, q are typically 0.0 here as you handle them in the Pricing Engine
+        drift_base = (r - q - 0.5 * v_t - drift_correction) * dt 
+        diffusion = np.sqrt(v_t) * sqrt_dt * Z1_row
         
-        # FIX: Include r, q, and drift_correction
-        drift_term = (r - q - 0.5 * v_t - drift_correction) * dt 
-        diff_term = np.sqrt(v_t) * sqrt_dt * Z1
+        # 2. POISSON JUMP LOGIC (Path-wise for CRN)
+        for i in range(n_paths):
+            # Inverse Transform Sampling for Poisson(lamb * dt)
+            # Uses noise_matrix[2] (Uniform) to determine number of jumps N
+            u = U_jump_row[i]
+            n_jumps = 0
+            p_pois = exp_neg_lam
+            s_pois = p_pois
+            while u > s_pois and n_jumps < 5: # Cap at 5 jumps per step (rare)
+                n_jumps += 1
+                p_pois *= lam_dt / n_jumps
+                s_pois += p_pois
+            
+            # Jump Magnitude logic
+            # Sum of N iid Normals N(mu, sig^2) is Normal(N*mu, N*sig^2)
+            jump_mag = 0.0
+            if n_jumps > 0:
+                jump_mag = n_jumps * mu_j + np.sqrt(float(n_jumps)) * sigma_j * Z_size_row[i]
+            
+            # Apply combined update
+            curr_s[i] *= np.exp(drift_base[i] + diffusion[i] + jump_mag)
         
-        curr_s *= np.exp(drift_term + diff_term + jump_mag)
-        
-        curr_v += kappa * (theta - v_t) * dt + xi * np.sqrt(v_t) * sqrt_dt * Zv
+        # 3. Variance update (Euler with reflection)
+        curr_v += kappa * (theta - v_t) * dt + xi * np.sqrt(v_t) * sqrt_dt * Zv_row
         prices[:, j + 1] = curr_s
         
     return prices
