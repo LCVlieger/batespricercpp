@@ -144,124 +144,125 @@ class BatesCalibrator:
             "weighted_obj": res.fun,
             "rmse": rmse_dollars # Report dollar RMSE even though we optimized IV RMSE
         }
+import numpy as np
+from numba import njit, prange
+from collections import defaultdict
+
+@njit(parallel=True, fastmath=True)
+def _numba_price_engine(paths, time_idxs, strikes, is_calls, rates, qs, drift_corr, maturities):
+    """
+    Optimized pricing engine. prange parallelizes across options.
+    """
+    n_opts = len(strikes)
+    n_paths = paths.shape[0]
+    prices = np.zeros(n_opts)
+    
+    for i in prange(n_opts):
+        t_idx = time_idxs[i]
+        K = strikes[i]
+        T = maturities[i]
+        r = rates[i]
+        q = qs[i]
+        is_call = is_calls[i]
+        
+        # Apply the exact drift adjustment from your original logic
+        adj_factor = np.exp((r - q - drift_corr) * T)
+        disc = np.exp(-r * T)
+        
+        payoff_sum = 0.0
+        for p in range(n_paths):
+            # paths[:, time_idx] access
+            S_final = paths[p, t_idx] * adj_factor
+            
+            if is_call:
+                val = S_final - K
+            else:
+                val = K - S_final
+            
+            if val > 0:
+                payoff_sum += val
+        
+        prices[i] = (payoff_sum / n_paths) * disc
+        
+    return prices
+
 class BatesCalibratorMC:
-    """
-    Monte Carlo Calibrator/Validator for Bates Model.
-    Uses 4-stream Common Random Numbers (Asset, Vol, JumpProb, JumpSize).
-    """
     def __init__(self, S0, r_curve, q_curve, n_paths=20000, n_steps=250):
         self.S0, self.r_curve, self.q_curve = S0, r_curve, q_curve
         self.n_paths, self.min_n_steps = n_paths, n_steps
         self.z_noise = None
-        self.maturity_map = defaultdict(list)
-        self.weights_map = defaultdict(list) 
-        self.maturity_indices = {}
-        self.T_max, self.dt = 0.0, 0.0
+        
+        # Internal state for flattened arrays
+        self.f_strikes = None
+        self.f_is_call = None
+        self.f_time_idxs = None
+        self.f_rates = None
+        self.f_qs = None
+        self.f_maturities = None
+        self.f_market_prices = None
+        self.f_weights = None
 
     def _precompute(self, options, sigma_cap=2.0):
-        self.maturity_map.clear()
-        self.weights_map.clear()
-        self.maturity_indices.clear()
+        # 1. Setup Time Grid
+        self.T_max = max(o.maturity for o in options)
+        self.dt = self.T_max / self.min_n_steps
         
+        # 2. Weights Logic
         spreads = np.array([max(abs(o.ask - o.bid), 0.01) for o in options])
         raw_weights = 1.0 / spreads
         cap_val = np.mean(raw_weights) + sigma_cap * np.std(raw_weights)
         all_weights = np.clip(raw_weights, None, cap_val)
         
-        for idx, opt in enumerate(options):
-            T = opt.maturity
-            self.maturity_map[T].append(opt)
-            self.weights_map[T].append(all_weights[idx])
-            
-        self.T_max = max(self.maturity_map.keys())
-        self.dt = self.T_max / self.min_n_steps
-        for T in self.maturity_map:
-            step_idx = int(round(T / self.dt))
-            self.maturity_indices[T] = max(1, min(step_idx, self.min_n_steps))
+        # 3. Flatten all data into aligned Numpy arrays
+        # This replaces the need for maturity_map and dictionary lookups in get_prices
+        self.f_strikes = np.array([o.strike for o in options], dtype=np.float64)
+        self.f_is_call = np.array([o.option_type.upper() == 'CALL' for o in options], dtype=np.bool_)
+        self.f_maturities = np.array([o.maturity for o in options], dtype=np.float64)
+        self.f_market_prices = np.array([o.market_price for o in options], dtype=np.float64)
+        self.f_weights = all_weights.astype(np.float64)
+        
+        # Pre-lookup rates and time indices (crucial speedup)
+        self.f_rates = np.array([self.r_curve.get_rate(o.maturity) for o in options])
+        self.f_qs = np.array([self.q_curve.get_rate(o.maturity) for o in options])
+        self.f_time_idxs = np.array([max(1, min(int(round(o.maturity / self.dt)), self.min_n_steps)) 
+                                    for o in options], dtype=np.int32)
 
-        # --- NOISE GENERATION FOR BATES (4 Channels) ---
-        if self.z_noise is None or self.z_noise.shape[1] != self.min_n_steps:
+        # 4. Noise Generation (Stay as is)
+        if self.z_noise is None or self.z_noise.shape[2] != self.n_paths:
             rng = np.random.default_rng(42)
+            # Shapes updated to match your generator: (4, n_steps, n_paths)
             self.z_noise = np.zeros((4, self.min_n_steps, self.n_paths))
             self.z_noise[0] = rng.standard_normal((self.min_n_steps, self.n_paths))
             self.z_noise[1] = rng.standard_normal((self.min_n_steps, self.n_paths))
-            self.z_noise[2] = rng.random((self.min_n_steps, self.n_paths)) # Uniforms for jumps
+            self.z_noise[2] = rng.random((self.min_n_steps, self.n_paths))
             self.z_noise[3] = rng.standard_normal((self.min_n_steps, self.n_paths))
     def get_prices(self, params):
-        # --- 1. SMART CASTING & BOUNDARY CHECK ---
-        p = [float(x) for x in params]
-        kappa, theta, xi, rho, v0, lamb, mu_j, sigma_j = p
+        kappa, theta, xi, rho, v0, lamb, mu_j, sigma_j = params
         
-        # --- SMART NUMERICAL FELLER DIAGNOSTIC ---
-        dt = self.T_max / self.min_n_steps
-        # Theoretical Feller
-        feller_ratio = (2 * kappa * theta) / (xi**2 + 1e-9)
-        
-        # Numerical Feller: Comparing the "Vol-of-Vol" shock size to the current variance
-        # If the shock xi*sqrt(dt) is > sqrt(v0), one bad draw sends you to zero.
-        numerical_vol_shock = xi * np.sqrt(dt)
-        prob_of_zero_hit = numerical_vol_shock / (np.sqrt(v0) + 1e-9)
-
-        if prob_of_zero_hit > 0.5:
-            print(f"!!! NUMERICAL STABILITY ALERT: Step size dt={dt:.4f} is too large.")
-            print(f"    Shock size ({numerical_vol_shock:.4f}) is {prob_of_zero_hit*100:.1f}% of sqrt(v0).")
-            print(f"    Increase min_n_steps to at least {int(xi**2 * self.T_max / (0.1 * v0))}.")
-        # --- 2. JUMP DRIFT COMPENSATION ---
-        # This is the "Smart" part. Jumps add drift. If you don't subtract it, 
-        # the model price will drift away from the spot price.
+        # 1. Calculate the Jump Compensator (Exact same math as Analytical CF)
         k_bar = np.exp(mu_j + 0.5 * sigma_j**2) - 1
-        jump_drift_adj = lamb * k_bar
+        jump_drift_correction = lamb * k_bar
 
-        # --- 3. NOISE & PATH MANAGEMENT ---
-        if self.z_noise is None or self.z_noise.shape[2] != self.n_paths or self.z_noise.shape[1] != self.min_n_steps:
-            print(f"--- Regenerating Noise: {self.n_paths} paths, {self.min_n_steps} steps ---")
-            rng = np.random.default_rng(42)
-            self.z_noise = np.zeros((4, self.min_n_steps, self.n_paths))
-            self.z_noise[0] = rng.standard_normal((self.min_n_steps, self.n_paths))
-            self.z_noise[1] = rng.standard_normal((self.min_n_steps, self.n_paths))
-            self.z_noise[2] = rng.random((self.min_n_steps, self.n_paths)) # Jump uniforms
-            self.z_noise[3] = rng.standard_normal((self.min_n_steps, self.n_paths))
-
-        # Run Kernel with zero drift (Scaling Hack)
+        # 2. Generate "Stochastic" Paths (Drift = 0 inside)
+        # Note: Passing 0.0 for r and q to be safe
         paths = generate_bates_paths_crn(
             self.S0, 0.0, 0.0, v0, kappa, theta, xi, rho, 
             lamb, mu_j, sigma_j,
             self.T_max, self.n_paths, self.min_n_steps, self.z_noise
         )
 
-        model_prices, market_prices, weights = [], [], []
+        # 3. Apply the TOTAL drift in the Price Engine
+        # adj_factor = e^((r - q - compensator) * T)
+        # This aligns the MC expectation perfectly with the Analytical Forward.
+        model_prices = _numba_price_engine(
+            paths, 
+            self.f_time_idxs, 
+            self.f_strikes, 
+            self.f_is_call, 
+            self.f_rates, 
+            self.f_qs, 
+            jump_drift_correction, # This is used as (r - q - jump_drift_correction) * T
+            self.f_maturities
+        )
         
-        # --- 4. MARTINGALE DIAGNOSTIC ---
-        # Check if the simulated mean matches S0 (before rate scaling)
-        sim_mean = np.mean(paths[:, -1])
-        # Adjust for jump drift because generate_bates_paths_crn should handle it
-        if abs(sim_mean - self.S0) / self.S0 > 0.02:
-            print(f"!!! MARTINGALE ALERT: Sim Mean {sim_mean:.2f} vs Spot {self.S0:.2f}. Drift is leaking!")
-
-        for T, opts in self.maturity_map.items():
-            time_idx = self.maturity_indices[T]
-            S_T = paths[:, time_idx]
-            strikes = np.array([o.strike for o in opts])
-            
-            r, q = self.r_curve.get_rate(T), self.q_curve.get_rate(T)
-            
-            # --- 5. SMART DRIFT SCALING ---
-            # We must scale by (r - q - jump_drift) to be mathematically sound
-            # Forward = S0 * exp((r - q - jump_drift) * T)
-            F = self.S0 * np.exp((r - q) * T) 
-            S_T_adj = S_T * (F / np.mean(S_T)) # Use sim mean for internal consistency
-            
-            # Payoff calculation
-            for i, opt in enumerate(opts):
-                if opt.option_type.upper() == "CALL":
-                    payoff = np.maximum(S_T_adj - opt.strike, 0.0)
-                else:
-                    payoff = np.maximum(opt.strike - S_T_adj, 0.0)
-                
-                price = np.mean(payoff) * np.exp(-r * T)
-                model_prices.append(price)
-                market_prices.append(opt.market_price)
-                weights.append(self.weights_map[T][i])
-                
-        return np.array(model_prices), np.array(market_prices), np.array(weights)
-    
+        return model_prices, self.f_market_prices, self.f_weights

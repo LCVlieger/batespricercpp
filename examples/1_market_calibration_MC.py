@@ -42,7 +42,7 @@ class SimpleOption:
 # =================================================================
 def save_results(ticker, S0, r_curve, q_curve, res_params, options):
     os.makedirs("results", exist_ok=True)
-    base_name = f"results/calibration_MC_{ticker}_20260208_020354"
+    base_name = f"results/calibration_MC_{ticker}_20260208_022951" #_20260208_020354 022951_meta.json
     
     tenors = [(0.02, "1 week"), (0.04, "2 weeks"), (0.0833, "1 Month"), (0.25, "3 Months"), (0.5, "6 Months"), (1.0, "1 Year")]
     r_sample = {f"{t:.4f}Y": float(r_curve.get_rate(t)) for t, label in tenors}
@@ -155,7 +155,7 @@ def print_curves(r_curve, q_curve):
 def main():
     # --- FILE CONFIGURATION ---
     # Filenames updated to match your uploaded files
-    json_path = "results/calibration_Analytic_AAPL_20260208_020354_meta.json"
+    json_path = "results/calibration_Analytic_AAPL_20260208_020354_meta.json" #"results/calibration_Analytic_^SPX_20260208_022951_meta.json" #"results/calibration_Analytic_AAPL_20260208_020354_meta.json"
     csv_path  = "results/calibration_Analytic_AAPL_20260208_020354_prices.csv"
     ticker = "AAPL" 
     
@@ -190,7 +190,7 @@ def main():
     print(f"Processing {len(options_processed)} options for MC Calibration...")
     
     # 2. Setup MC Calibrator
-    mc_calib = BatesCalibratorMC(S0=S0_actual, r_curve=r_curve, q_curve=q_curve, n_paths=20000, n_steps=5000)
+    mc_calib = BatesCalibratorMC(S0=S0_actual, r_curve=r_curve, q_curve=q_curve, n_paths=50000, n_steps=1000)
     mc_calib._precompute(options_processed)
     
     # 3. Optimization Setup
@@ -206,16 +206,15 @@ def main():
     print(f"LOCKING v0 to Market Reality: {fixed_v0:.4f} (Vol: {implied_v0_root:.1%})")
 
     bounds = [
-        (0.5, 10.0),   # kappa
-        (0.01, 0.10),  # theta
-        (0.1, 1.5),    # xi
-        (-0.99, -0.5), # rho
-        (0.005, 0.10), # v0
-        (0.1, 3.0),    # lambda
-        (-0.3, -0.01), # mu_j
-        (0.01, 0.3)    # sigma_j
-    ]
-    
+            (0.1, 10.0),   # kappa (Speed of mean reversion)
+            (0.001, 0.5),  # theta (Long run variance)
+            (0.01, 5.0),   # xi (Vol of Vol - allow high values for steep smile)
+            (-0.99, 0.0), # rho (Correlation - Locked negative for Equity Skew)
+            (0.001, 0.5),  # v0 (Initial variance)
+            (0.0, 5.0),    # lamb (Jump intensity)
+            (-0.5, 0.5),   # mu_j (Mean jump size)
+            (0.01, 0.5)    # sigma_j (Jump volatility)
+        ]
     x0 = [1.5, 0.25, 0.6, -0.2, 0.21, 0.5, -0.05, 0.2]#[2.0, fixed_v0, 1.0, -0.7, fixed_v0, 0.1, -0.1, 0.1]
     
     def objective(p):
@@ -233,7 +232,7 @@ def main():
               f"v0:{xk[4]:.4f} th:{xk[1]:.4f} ka:{xk[0]:.3f} xi:{xk[2]:.3f} rho:{xk[3]:.2f}")
         
     t0 = time.time()
-    res = minimize(objective, x0, method='SLSQP', bounds=bounds, callback=callback, tol=1e-8, options={'maxiter': 50, 'eps': 1e-2})
+    res = minimize(objective, x0, method='SLSQP', bounds=bounds, callback=callback, tol=1e-8, options={'maxiter': 50, 'eps': 1e-2}) #was -2
     
     print(f"CALIBRATION DONE (Time: {time.time()-t0:.2f}s)")
     
