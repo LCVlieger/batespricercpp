@@ -7,43 +7,6 @@ from datetime import datetime
 from scipy.optimize import minimize
 from scipy.interpolate import interp1d
 from heston_pricer.calibration import BatesCalibratorMC 
-from heston_pricer.analytics import implied_volatility
-
-# =================================================================
-# HELPER CLASSES (To mimic objects from data fetchers)
-# =================================================================
-class InterpolatedCurve:
-    """Reconstructs a curve from the JSON samples."""
-    def __init__(self, curve_dict):
-        # Parse keys like "0.0200Y" -> 0.02
-        times = sorted([float(k.replace('Y', '')) for k in curve_dict.keys()])
-        rates = [curve_dict[f"{t:.4f}Y"] for t in times]
-        # Linear interpolation with flat extrapolation
-        self.interp = interp1d(times, rates, kind='linear', fill_value=(rates[0], rates[-1]), bounds_error=False)
-
-    def get_rate(self, T):
-        return float(self.interp(T))
-
-class SimpleOption:
-    """Structure to hold option data compatible with BatesCalibratorMC"""
-    def __init__(self, T, K, type_str, price, spread):
-        self.maturity = T
-        self.strike = K
-        self.option_type = type_str
-        self.market_price = price
-        # Reconstruct Ask/Bid so the MC engine calculates the same weights (1/spread)
-        half_spread = spread / 2.0
-        self.ask = price + half_spread
-        self.bid = price - half_spread
-import os
-import json
-import time
-import numpy as np
-import pandas as pd
-from datetime import datetime
-from scipy.optimize import minimize
-from scipy.interpolate import interp1d
-from heston_pricer.calibration import BatesCalibratorMC 
 # Added price_bates for the analytical validation step
 from heston_pricer.analytics import implied_volatility, BatesAnalyticalPricer
 
@@ -77,10 +40,9 @@ class SimpleOption:
 # =================================================================
 # 3. SAVING & VALIDATION (Analytic Pricing on MC Params)
 # =================================================================
-def save_results(ticker, S0, r_curve, q_curve, res_params, options, mc_calibrator):
+def save_results(ticker, S0, r_curve, q_curve, res_params, options):
     os.makedirs("results", exist_ok=True)
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    base_name = f"results/calibration_MC_{ticker}_{timestamp}"
+    base_name = f"results/calibration_MC_{ticker}_20260208_020354"
     
     tenors = [(0.02, "1 week"), (0.04, "2 weeks"), (0.0833, "1 Month"), (0.25, "3 Months"), (0.5, "6 Months"), (1.0, "1 Year")]
     r_sample = {f"{t:.4f}Y": float(r_curve.get_rate(t)) for t, label in tenors}
@@ -193,9 +155,9 @@ def print_curves(r_curve, q_curve):
 def main():
     # --- FILE CONFIGURATION ---
     # Filenames updated to match your uploaded files
-    json_path = "calibration_Analytic_^SPX_20260208_022951_meta.json"
-    csv_path  = "calibration_Analytic_^SPX_20260208_022951_prices.csv"
-    ticker = "^SPX" 
+    json_path = "results/calibration_Analytic_AAPL_20260208_020354_meta.json"
+    csv_path  = "results/calibration_Analytic_AAPL_20260208_020354_prices.csv"
+    ticker = "AAPL" 
     
     print(f"Initializing Bates MC Calibration for {ticker} using LOCAL FILES...")
     
@@ -228,7 +190,7 @@ def main():
     print(f"Processing {len(options_processed)} options for MC Calibration...")
     
     # 2. Setup MC Calibrator
-    mc_calib = BatesCalibratorMC(S0=S0_actual, r_curve=r_curve, q_curve=q_curve, n_paths=5000, n_steps=4000)
+    mc_calib = BatesCalibratorMC(S0=S0_actual, r_curve=r_curve, q_curve=q_curve, n_paths=20000, n_steps=5000)
     mc_calib._precompute(options_processed)
     
     # 3. Optimization Setup
@@ -254,7 +216,7 @@ def main():
         (0.01, 0.3)    # sigma_j
     ]
     
-    x0 = [2.0, fixed_v0, 1.0, -0.7, fixed_v0, 0.1, -0.1, 0.1]
+    x0 = [1.5, 0.25, 0.6, -0.2, 0.21, 0.5, -0.05, 0.2]#[2.0, fixed_v0, 1.0, -0.7, fixed_v0, 0.1, -0.1, 0.1]
     
     def objective(p):
         try:
@@ -277,7 +239,7 @@ def main():
     
     final_params = dict(zip(['kappa', 'theta', 'xi', 'rho', 'v0', 'lamb', 'mu_j', 'sigma_j'], res.x))
     
-    save_results(ticker, S0_actual, r_curve, q_curve, final_params, options_processed, mc_calib)
-    
+    save_results(ticker, S0_actual, r_curve, q_curve, final_params, options_processed)
+
 if __name__ == "__main__":
     main()
