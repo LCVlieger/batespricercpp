@@ -155,8 +155,8 @@ def print_curves(r_curve, q_curve):
 def main():
     # --- FILE CONFIGURATION ---
     # Filenames updated to match your uploaded files
-    json_path = "results/calibration_Analytic_AAPL_20260208_020354_meta.json" #"results/calibration_Analytic_^SPX_20260208_022951_meta.json" #"results/calibration_Analytic_AAPL_20260208_020354_meta.json"
-    csv_path  = "results/calibration_Analytic_AAPL_20260208_020354_prices.csv"
+    json_path = "results/calibration_Analytic_AAPL_20260208_020354_meta.json" #"results/calibration_Analytic_AAPL_20260208_020354_meta.json"
+    csv_path  = "results/calibration_Analytic_AAPL_20260208_020354_prices.csv" #"results/calibration_Analytic_^SPX_20260208_022951_meta.json"
     ticker = "AAPL" 
     
     print(f"Initializing Bates MC Calibration for {ticker} using LOCAL FILES...")
@@ -190,7 +190,7 @@ def main():
     print(f"Processing {len(options_processed)} options for MC Calibration...")
     
     # 2. Setup MC Calibrator
-    mc_calib = BatesCalibratorMC(S0=S0_actual, r_curve=r_curve, q_curve=q_curve, n_paths=5000, n_steps=4000)
+    mc_calib = BatesCalibratorMC(S0=S0_actual, r_curve=r_curve, q_curve=q_curve, n_paths=10000, n_steps=4000)  #5000 4000
     mc_calib._precompute(options_processed)
     
     # 3. Optimization Setup
@@ -206,14 +206,14 @@ def main():
     print(f"LOCKING v0 to Market Reality: {fixed_v0:.4f} (Vol: {implied_v0_root:.1%})")
 
     bounds = [
-            (0.1, 10.0),   # kappa (Speed of mean reversion)
+            (1.0, 5.0),   # kappa (Speed of mean reversion)
             (0.001, 0.5),  # theta (Long run variance)
             (0.01, 1.5),   # xi (Vol of Vol - allow high values for steep smile)
             (-0.99, 0.0), # rho (Correlation - Locked negative for Equity Skew)
             (0.001, 0.5),  # v0 (Initial variance)
             (0.0, 1.0),    # lamb (Jump intensity)
-            (-0.5, 0.5),   # mu_j (Mean jump size)
-            (0.01, 0.5)    # sigma_j (Jump volatility)
+            (-0.3, 0.0),   # mu_j (Mean jump size)
+            (0.05, 0.3)    # sigma_j (Jump volatility)
         ]
     x0 = [1.5, 0.25, 0.6, -0.2, 0.21, 0.5, -0.05, 0.2]#[2.0, fixed_v0, 1.0, -0.7, fixed_v0, 0.1, -0.1, 0.1]
     
@@ -232,7 +232,7 @@ def main():
               f"v0:{xk[4]:.4f} th:{xk[1]:.4f} ka:{xk[0]:.3f} xi:{xk[2]:.3f} rho:{xk[3]:.2f} | lam:{xk[5]:1.3f}  mu_j:{xk[6]:1.3f}  sig_j:{xk[7]:1.3f}")
         
     t0 = time.time()
-    res = minimize(objective, x0, method='SLSQP', bounds=bounds, callback=callback, tol=1e-8, options={'maxiter': 50, 'eps': 1e-2}) #was -2
+    res = minimize(objective, x0, method='SLSQP', bounds=bounds, callback=callback, tol=1e-8, options={'maxiter': 500, 'eps': 1e-1}) #was -2
     
     print(f"CALIBRATION DONE (Time: {time.time()-t0:.2f}s)")
     

@@ -255,6 +255,7 @@ class BatesCalibratorMC:
             
             avg_terminal = np.mean(paths[:, -1])
             ratio = avg_terminal / self.S0
+            print(ratio)
             # Only print if we are significantly off (e.g., > 1% error)
             if abs(ratio - 1.0) > 0.01:
                 print(f"CRITICAL DRIFT ERROR: Ratio={ratio:.4f} | S0={self.S0:.2f} Avg_Sim={avg_terminal:.2f}")
