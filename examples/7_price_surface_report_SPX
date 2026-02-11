@@ -60,7 +60,7 @@ def visualize_price_surface_final(csv_file):
     # --- DOT STYLING (Inspired by your IV plot) ---
     # We use a pure red, but with a subtle gray/transparent edge
     # to soften the harshness of the point on the light background
-    stale_red = "#CF0000"
+    stale_red = "#BC0000" #"#BC0000"
     dot_color = stale_red
     dot_size = 40  # Adjusted for side-by-side legibility
     edge_col = (0.5, 0.5, 0.5, 0.03) # Very subtle gray transparent border
@@ -188,8 +188,13 @@ def visualize_price_surface_final(csv_file):
         framealpha=1.0, 
         labelcolor="black", fontsize=10,
     )
-    for handle in leg.legendHandles:
-        handle.set_color(stale_red)
+    i = 0  # index of the legend entry you want
+
+    h = leg.legendHandles[i]
+    h.set_facecolor(stale_red)
+    h.set_edgecolor(edge_col)
+    h.set_linewidth(edge_width)
+    h.set_alpha(dot_alpha)
     # 4. STYLING
     ax.dist = 11
     ax.set_xlabel('Moneyness ($K/S_0$)', labelpad=5, fontsize=11)
