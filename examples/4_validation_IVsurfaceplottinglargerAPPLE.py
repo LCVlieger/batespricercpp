@@ -25,7 +25,7 @@ def create_gamma_cmap(base_cmap_name, gamma=0.5):
     base = cm.get_cmap(base_cmap_name)
     N = 256
     # Create a linear ramp
-    values = np.linspace(0, 1, N)
+    values = np.linspace(0, 0.75, N)
     # Apply gamma correction to the indices we pull from the original map
     # gamma < 1 stretches the low end (makes it pop)
     warped_values = values ** gamma 
@@ -156,13 +156,13 @@ def plot_surface_professional(S0, r_curve, q_curve, params, ticker, filename, ma
         from matplotlib.colors import LightSource
         import matplotlib.colors as mcolors
         ls = LightSource(azdeg=270, altdeg=45)
-        vmin = 0.0953 
+        vmin = 0.1151
         vmax=0.72
-        my_cmap = create_gamma_cmap('RdYlBu_r', gamma=1.3)
+        my_cmap = create_gamma_cmap('RdYlBu_r', gamma=1.1)
         norm = mcolors.Normalize(vmin=vmin, vmax=vmax)
         # Use the light source to shade the data
         rgb = ls.shade(Z, cmap=my_cmap, norm=norm, vert_exag=0.1)
-        surf = ax.plot_surface(X, Y, Z_smooth, facecolors = rgb,    cmap=cm.RdYlBu_r, 
+        surf = ax.plot_surface(X, Y, Z_smooth, facecolors = rgb,    cmap=my_cmap, 
                                rcount=100, ccount=100,  
                                edgecolor='black', linewidth=0.0, alpha=0.8,#0.085   #0.8                     
                                shade=False, antialiased=True, zorder=1)
@@ -193,18 +193,25 @@ def plot_surface_professional(S0, r_curve, q_curve, params, ticker, filename, ma
 
                 ax.plot([m_mkt, m_mkt], [t_mkt, t_mkt], [iv_mod_exact, iv_mkt], 
                         color='white', linestyle='-', linewidth=0.8, alpha=0.65, zorder=dot_zorder)
-                lbl = 'Market Price-IV' if valid_needles == 1 else ""
+                lbl = 'Market IV' if valid_needles == 1 else ""
                 ax.plot([m_mkt, m_mkt], [t_mkt, t_mkt], [iv_mkt], 
-                        marker='o', linestyle='None', color="#F0F0F0", 
-                        markersize=4.0, alpha=0.9, zorder=dot_zorder + 1, label=lbl)
-
+                        marker='o', 
+                        linestyle='None', 
+                        color="#F0F0F0", 
+                        markersize=6.5, 
+                        markeredgecolor=(0.5, 0.5, 0.5, 0.03), # Adds the border
+                        markeredgewidth=0.01,     # Keeps it subtle
+                        alpha=0.85, 
+                        zorder=dot_zorder + 1, 
+                        label=lbl)
         # --- AESTHETICS ---
         ax.dist = 11  # Your preferred zoom level
+        ax.tick_params(axis='both', which='major', colors='#D7D7D7', labelsize=10)
         ax.set_xlim(LOWER_M, UPPER_M)
         ax.set_ylim(UPPER_T, LOWER_T) 
         ax.set_zlim(0.0, 0.75)
-        grid_style = (0.23, 0.23, 0.23, 0.82) #(0.55, 0.55, 0.55, 0.35) 
-        linewidth_val = 1.7925
+        grid_style = (0.23, 0.23, 0.23, 0.75) #(0.55, 0.55, 0.55, 0.35) 
+        linewidth_val = 1.77
         ax.xaxis.set_pane_color((0, 0, 0, 1))
         ax.yaxis.set_pane_color((0, 0, 0, 1))
         ax.zaxis.set_pane_color((0, 0, 0, 1))
@@ -217,9 +224,9 @@ def plot_surface_professional(S0, r_curve, q_curve, params, ticker, filename, ma
         ax.view_init(elev=28, azim=-115) 
 
         # Axis Labels: Padded to prevent overlap with tick labels
-        ax.set_xlabel('Moneyness ($K/S_0$)', color='white', labelpad=5, fontsize=11)
-        ax.set_ylabel('Maturity ($T$ Years)', color='white', labelpad=5, fontsize=11)
-        ax.set_zlabel(r'Implied Volatility', color='white', labelpad=5, fontsize=11)
+        ax.set_xlabel('Moneyness ($K/S_0$)', color="#D7D7D7", labelpad=5, fontsize=11)
+        ax.set_ylabel('Maturity ($T$ Years)', color="#D7D7D7", labelpad=5, fontsize=11)
+        ax.set_zlabel(r'Implied Volatility', color="#D7D7D7", labelpad=5, fontsize=11)
         ax.tick_params(axis='both', which='major', labelsize=10)
 
         # --- TITLES ---
@@ -233,17 +240,27 @@ def plot_surface_professional(S0, r_curve, q_curve, params, ticker, filename, ma
         # --- LEGEND ---
         if market_options and valid_needles > 0:
             # FIX 3: Safe coordinates that won't float away
-            ax.legend(loc='upper left', bbox_to_anchor=(0.175, 0.79), 
-                      frameon=False, labelcolor="#D7D7D7", fontsize=10)
+            if market_options and valid_needles > 0:
+            # FIX 3: Safe coordinates that won't float away
+                ax.legend(loc='upper left', 
+                bbox_to_anchor=(0.175, 0.79), 
+                frameon=True,
+                edgecolor='none',
+                labelcolor="#D7D7D7",  # Keeps the text at d7d7
+                handletextpad=0.5,
+                fontsize=10)
+                leg = ax.get_legend()
+                for handle in leg.legend_handles:
+                    handle.set_color('#F0F0F0') # Matches your plot marker color
         from matplotlib.ticker import FixedLocator
         # --- COLORBAR ---
         cbar = fig.colorbar(m, ax=ax, shrink=0.5, aspect=15, pad=-0.02)
         tick_locations = np.arange(0.1, 0.8, 0.1) # [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7]
         cbar.locator = FixedLocator(tick_locations)
         cbar.update_ticks()
-        cbar.ax.yaxis.set_tick_params(color='white', labelcolor='white', labelsize=10)
+        cbar.ax.yaxis.set_tick_params(color="#D7D7D7", labelcolor="#D7D7D7", labelsize=10)
         cbar.outline.set_visible(False)
-        cbar.ax.set_title("Model IV", color='white', fontsize=10, pad=9)
+        cbar.ax.set_title("Model IV", color="#D7D7D7", fontsize=10, pad=9)
         
         save_path = f"{filename}_surface_refined.png"
         

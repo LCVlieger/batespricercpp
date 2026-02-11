@@ -1,0 +1,127 @@
+import json
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+from mpl_toolkits.mplot3d import Axes3D
+from matplotlib import cm
+import glob
+import os
+
+def visualize_price_surface_final(csv_file):
+    """
+    Final Polish: Light-colored Triangular Surface, no titles,
+    larger market points for side-by-side readability, and PDF export.
+    """
+    print(f"Generating Final Polished Plot from {csv_file}...")
+    df = pd.read_csv(csv_file)
+    
+    # 1. Load Metadata
+    base_name = csv_file.replace("_prices.csv", "")
+    json_file = f"{base_name}_meta.json"
+    
+    # Default values
+    s0 = df['K'].median()
+    
+    try:
+        with open(json_file, 'r') as f:
+            meta = json.load(f)
+            s0 = meta['market']['S0']
+    except Exception:
+        pass
+
+    df['Moneyness'] = df['K'] / s0
+
+    # 2. Setup Plot (Original White Background)
+    fig = plt.figure(figsize=(10, 7))
+    ax = fig.add_subplot(111, projection='3d')
+    ax.computed_zorder = False
+    
+    # --- Increased point size (s=35) for better visibility in small layouts ---
+    ax.scatter(
+        df['Moneyness'], df['T'], df['Market'], 
+        color='r', 
+        s=25,  
+        label='Market Price', 
+        depthshade=False, zorder=1
+    )
+    
+    # --- Layer A: Triangular Surface ---
+    surf = ax.plot_trisurf(
+        df['Moneyness'], df['T'], df['Model'], 
+        cmap=cm.viridis, 
+        alpha=0.6, 
+        edgecolor='none', 
+        linewidth=0, 
+        antialiased=True, zorder=3
+    )
+
+    # --- Layer C: Needles ---
+    for x, y, z_mkt, z_mod in zip(df['Moneyness'], df['T'], df['Market'], df['Model']):
+        ax.plot([x, x], [y, y], [z_mkt, z_mod], color='black', alpha=0.3, linewidth=0.8, zorder=2)
+
+    # 3. LEGEND
+    ax.legend(
+        loc='upper left', 
+        bbox_to_anchor=(0.09935, 0.799), #0.8265
+        frameon=True, 
+        edgecolor='none', 
+        framealpha=1,
+        facecolor=(0.95, 0.95, 0.95),
+        labelcolor="black", 
+        fontsize=10,
+    )
+
+    # 4. TITLES (Removed for report readiness)
+
+    # 5. STYLING & FONTS
+    ax.dist = 11
+
+    # Labels
+    ax.set_xlabel('Moneyness ($K/S_0$)', labelpad=5, fontsize=11)
+    ax.set_ylabel('Maturity ($T$ Years)', labelpad=5, fontsize=11)
+    ax.set_zlabel('Option Price ($)', labelpad=5, fontsize=11)
+
+    # Unify Axis Tick Fonts
+    for axis in [ax.xaxis, ax.yaxis, ax.zaxis]:
+        axis._axinfo["grid"].update({
+            'linewidth': 0.575,              
+            'alpha': 1
+        })
+        for label in axis.get_ticklabels():
+        #    label.set_family('monospace')
+            label.fontsize = 11
+
+    # Original TILT
+    ax.view_init(elev=30, azim=-120)
+    
+    # Adjusted layout (top increased from 0.85 to 0.95 since titles are gone)
+    fig.subplots_adjust(left=0.25, bottom=0.05, right=0.95, top=0.95)
+
+    # 6. Colorbar
+    cbar = fig.colorbar(surf, ax=ax, shrink=0.5, aspect=15, pad=-0.01)
+    cbar.ax.set_title("Model Price", fontsize=10, pad=9)
+    cbar.outline.set_visible(False)
+    cbar.ax.tick_params(labelsize=10)
+    #for l in cbar.ax.yaxis.get_ticklabels():
+    #    l.set_family('monospace')
+
+    # 7. Save to PDF (Vector Format)
+    save_path = csv_file.replace(".csv", "_price_surface_final.pdf")
+    plt.savefig(save_path, format='pdf', bbox_inches='tight', pad_inches=0.22)
+    print(f"-> Saved True Vector PDF: {save_path}")
+
+# --- Run ---
+if __name__ == "__main__":
+    files = glob.glob("results/calibration_*_prices.csv")
+    
+    # Fallback to root directory if results folder is empty
+    if not files:
+        files = glob.glob("calibration_*_prices.csv")
+        
+    if files:
+        # Pick the latest file
+        files_sorted = sorted(files, key=os.path.getctime, reverse=True)
+        latest_file = files_sorted[1]
+        visualize_price_surface_final(latest_file)
+    else:
+        print("No calibration files found.")
