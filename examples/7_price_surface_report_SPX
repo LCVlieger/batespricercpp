@@ -60,15 +60,15 @@ def visualize_price_surface_final(csv_file):
     # --- DOT STYLING (Inspired by your IV plot) ---
     # We use a pure red, but with a subtle gray/transparent edge
     # to soften the harshness of the point on the light background
-    stale_red = "#940000" #"#BC0000"
+    stale_red = "#7E1F1F" #"#BC0000"
     dot_color = stale_red
-    dot_size = 40  # Adjusted for side-by-side legibility
-    edge_col = (0.4, 0, 0, 0.03) # Very subtle gray transparent border
+    dot_size = 39  # Adjusted for side-by-side legibility
+    edge_col = (0.3, 0.02, 0.02, 0.03) # Very subtle gray transparent border
     edge_width = 0.01
-    dot_alpha = 0.85
+    dot_alpha = 0.6
     for x, y, z_mkt, z_mod in zip(df['Moneyness'], df['T'], df['Market_Rel'], df['Model_Rel']):
         z_ord = 10 if z_mkt >= z_mod else 1
-        ax.plot([x, x], [y, y], [z_mkt, z_mod], linestyle="-", color="#FF0000FF", alpha=0.65, linewidth=0.8, zorder=z_ord)
+        ax.plot([x, x], [y, y], [z_mkt, z_mod], linestyle="-", color=stale_red, alpha=dot_alpha, linewidth=0.8, zorder=z_ord)
 # --- 2A. Dots BELOW the Surface (zorder=1) ---
     # --- 2A. Dots BELOW the Surface (zorder=1) ---
     # --- 2A. Dots BELOW the Surface (Fixed for Edge-Bleeding) ---
