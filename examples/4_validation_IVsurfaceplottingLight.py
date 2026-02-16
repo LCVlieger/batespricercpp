@@ -108,16 +108,16 @@ def create_premium_cmap_1():
     #    "#FFC107"   # Amber/Gold (The Peak)
     #]
     colors = [
-            "#081B4B",  # Deep Midnight/Navy (The deep OTM/ITM base)
-            "#0F3CB7",  # Bright Dodger Blue
-            "#3498DB",  # Mid Blue
-            "#00C6FF",  # Laser Cyan (Transition)
-            "#B2EBF2",  # Pale Cyan 
-            "#E0F7FA"   # Icy White (The Peak / highest volatility)
+            "#091D57",  # Slate Blue (Lifts the floor so you can see below the plot)
+            "#2B66BF",  # Professional Mid Blue 
+            "#2E88CD",  # Soft Sky Blue
+            "#9BDEF2",  # Pale Powder Blue (Replaces the harsh Laser Cyan)
+            "#C2ECF7"   # Frost White (Not pure white, so it doesn't bleed into the background)
         ]
+    
     # We position the nodes to give the blue floor more space, 
     # ensuring the whole surface looks illuminated.
-    nodes = [0.0, 0.1, 0.3, 0.45, 0.8, 1.0]
+    nodes = [0.0, 0.1, 0.45, 0.8, 1.0]
     
     cmap = mcolors.LinearSegmentedColormap.from_list("NeonGold", list(zip(nodes, colors)))
     base = cm.get_cmap(cmap)
@@ -129,7 +129,7 @@ def create_premium_cmap_1():
     warped_values = values ** gamma 
     return cmap
 
-stale_red ="#9E0000"
+
 
 def create_mint_surface_cmap():
     """
@@ -147,7 +147,7 @@ def create_mint_surface_cmap():
     ]
     
     # 1. Create Base Map
-    n_bins = 256
+    n_bins = 1000
     cmap = mcolors.LinearSegmentedColormap.from_list('mint_quant', colors, N=n_bins)
     
     # 2. Apply "Warping" (Gamma Correction)
@@ -160,71 +160,6 @@ def create_mint_surface_cmap():
     warped_colors = cmap(warped_vals)
     return mcolors.ListedColormap(warped_colors, name='mint_quant_warped')
 
-def create_paper_premium_cmap(style='plasma_fire'):
-    """
-    Creates a custom colormap designed specifically for white backgrounds.
-    It avoids 'invisible' yellows and maximizes saturation.
-    """
-    
-    # 1. 'Plasma Fire': Deep Purple -> Red -> Orange (Classic Vol Surface)
-    # Good for: Highlighting extreme volatility without losing the floor.
-    if style == 'plasma_fire':
-        colors = [
-            "#0d0887",  # Deep Indigo (Floor - distinct from white)
-            "#7201a8",  # Rich Purple
-            "#bd3786",  # Magenta
-            "#ed7953",  # Salmon
-            "#fdc527",  # Deep Gold (Not pale yellow!)
-            "#f0f921"   # Brightest Yellow (Only for very peaks)
-        ]
-        
-    # 2. 'Oceanic Tech': Deep Navy -> Teal -> Lime (Modern/Clean)
-    # Good for: Smooth surfaces, very 'fintech' look.
-    elif style == 'oceanic':
-        colors = [
-            "#081d58",  # Midnight Blue (Floor)
-            "#225ea8",  # Royal Blue
-            "#41b6c4",  # Ocean Teal
-            "#7fcdbb",  # Soft Cyan
-            "#c7e9b4",  # Pale Green (Mid)
-            "#edf8b1"   # Pale Yellow (Peak)
-        ]
-
-    # 3. 'Cyber-Paper': The "Cool" option. 
-    # Deep Blue -> Cyan -> White/Grey -> Red -> Dark Red
-    # Mimics a diverging map but keeps the 'cool' intensity.
-    elif style == 'cyber_paper':
-        colors = [
-            "#202060",  # Deep Slate Blue (Floor)
-            "#4060b0",  # Medium Blue
-            "#60a0d0",  # Steel Blue
-            "#b0d0e0",  # Ice Blue
-            "#f0b090",  # Soft Orange
-            "#d05040",  # Brick Red
-            "#801010"   # Deep Crimson (Peak)
-        ]
-
-    # Create the base linear map
-    n_bins = 256
-    cmap = mcolors.LinearSegmentedColormap.from_list(f'custom_{style}', colors, N=n_bins)
-    
-    # --- APPLY YOUR WARPING LOGIC ---
-    # We apply a gamma correction to 'push' the middle colors 
-    # so the floor doesn't dominate.
-    
-    # Extract the colors from the new map
-    vals = np.linspace(0, 1, n_bins)
-    
-    # Gamma < 1 expands the darks (makes more floor visible)
-    # Gamma > 1 expands the lights (makes more peaks visible)
-    # For white paper, we usually want Gamma ~0.8 to make sure the faint blues show up.
-    gamma = 0.85 
-    warped_vals = np.power(vals, gamma)
-    
-    # Re-sample the colormap
-    warped_colors = cmap(warped_vals)
-    
-    return mcolors.ListedColormap(warped_colors, name=f'{style}_warped')
 def create_premium_cmap(base_cmap_name):
     base = cm.get_cmap(base_cmap_name)
     N = 256
@@ -355,13 +290,13 @@ def plot_surface_professional(S0, r_curve, q_curve, params, ticker, filename, ma
 
     LOWER_M, UPPER_M = 0.685, 1.315                    
     LOWER_T, UPPER_T = 0.04, 1.5 
-    GRID_DENSITY =  60 # 550# 550 #80
+    GRID_DENSITY =  150 # 550# 550 #80
 
     print(f"-> Generating Surface for: {ticker}")
     print(f"   Model: {'Bates' if is_bates else 'Heston'}")
     print(f"   Calculating true gradient-based adaptive mesh...")
     
-    COARSE_N = 30 # 120 #80  150
+    COARSE_N = 100 # 120 #80  150
     c_M = np.linspace(LOWER_M, UPPER_M, COARSE_N)
     c_T = np.linspace(LOWER_T, UPPER_T, COARSE_N)
     cX, cY = np.meshgrid(c_M, c_T)
@@ -457,14 +392,14 @@ def plot_surface_professional(S0, r_curve, q_curve, params, ticker, filename, ma
 
     ls = LightSource(azdeg=270, altdeg=45)
     vmin, vmax = 0.1151, 0.72
-    my_cmap = create_gamma_cmap('viridis', gamma=0.5) 
+    my_cmap = create_premium_cmap_1()
     norm = mcolors.Normalize(vmin=vmin, vmax=vmax)
     
     rgb = ls.shade(Z_smooth, cmap=my_cmap, norm=norm, vert_exag=0.1)
     
     surf = ax.plot_surface(X, Y, Z_smooth, facecolors=rgb, cmap=my_cmap, 
                            rcount=X.shape[0], ccount=X.shape[1], 
-                           edgecolor='none', linewidth=0.2, alpha=0.6, 
+                           edgecolor='none', linewidth=0.2, alpha=0.85, 
                            shade=False, antialiased=True, zorder=1, rasterized=True)
                                
     m = cm.ScalarMappable(cmap=my_cmap, norm=norm)
@@ -496,22 +431,46 @@ def plot_surface_professional(S0, r_curve, q_curve, params, ticker, filename, ma
             valid_needles += 1
             is_above = iv_mkt >= iv_mod_exact
             dot_zorder = 10 if is_above else 1
-            alpha_above = 0.85  # Keep these crisp
+            alpha_above = 0.98  # Keep these crisp
             alpha_below = 1.0  # Make these very transparent
+ # --- COLOR DEFINITIONS ---
+ # --- COLOR DEFINITIONS (No Glow) ---
+            # Above: A clean, solid "International Orange" that pops against light blue
+            color_above = "#FFE065" #"#FFDD6B" "#FFE065"
+            # Below: A very dark "Prussian Blue" or "Charcoal" 
+            # This provides the best contrast against the light blue surface from underneath
+            color_below =  "#2B1600"
+            
+            current_color = color_above if is_above else color_below
 
-            current_alpha = alpha_above if is_above else alpha_below
-            
-            # CHANGED: Needles are now stale_red instead of white
+            # 1. THE NEEDLE
             ax.plot([m_mkt, m_mkt], [t_mkt, t_mkt], [iv_mod_exact, iv_mkt], 
-                    color=stale_red, linestyle='-', linewidth=0.8, alpha=0.65, zorder=dot_zorder)
-            lbl = 'Market IV' if valid_needles == 1 else ""
-            
-            # CHANGED: Dots are now stale_red instead of F0F0F0
-            ax.plot([m_mkt, m_mkt], [t_mkt, t_mkt], [iv_mkt], 
-                    marker='o', linestyle='None', color=stale_red, markersize=4.62,
-                    markerfacecolor=stale_red, markeredgecolor='none', markeredgewidth=0.01,
-                    alpha=current_alpha, zorder=dot_zorder + 1, label=lbl)
-                        
+                    color=current_color, linestyle='-', linewidth=0.8, alpha=0.4, zorder=dot_zorder)
+
+            # 2. THE "SILENCING HALO" (The Punch-Through)
+            # We plot a slightly larger dot in WHITE with a higher alpha.
+            # This "deletes" the blue surface color in the exact spot of the dot,
+            # acting as a clean window for the data point.
+            if not is_above:
+                ax.plot([m_mkt], [t_mkt], [iv_mkt], 
+                        marker='o', linestyle='None', color="#322500FF", 
+                        markersize=4.62, markeredgecolor='none', # Slightly larger than the core
+                        alpha=1.0,       # Effectively "punches" a hole in the blue surface
+                        zorder=dot_zorder)
+                ax.plot([m_mkt], [t_mkt], [iv_mkt], 
+                        marker='o', linestyle='None', color="#231D00", 
+                        markersize=4.62, markeredgecolor='none', # Slightly larger than the core
+                        alpha=0.5,       # Effectively "punches" a hole in the blue surface
+                        zorder=9)
+                
+            current_alpha = alpha_above if is_above else alpha_below
+            # 3. THE "CORE"
+            ax.plot([m_mkt], [t_mkt], [iv_mkt], 
+                    marker='o', linestyle='None', color=current_color, 
+                    markersize=4.62,
+                    markerfacecolor=current_color, markeredgecolor='none',
+                    alpha=current_alpha,       # Solid, no-nonsense core
+                    zorder=dot_zorder + 1)
     ax.dist = 11  
     ax.set_xlim(LOWER_M, UPPER_M)
     ax.set_ylim(UPPER_T, LOWER_T) 
