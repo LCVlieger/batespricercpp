@@ -100,7 +100,7 @@ def visualize_price_surface_final(csv_file):
         triangles=tri_refined.triangles,
         cmap=my_cmap, norm=norm,
         lightsource=ls, shade=True, 
-        edgecolor='none', alpha=0.9, 
+        edgecolor='none', alpha=0.85, 
         antialiased=True, zorder=3, rasterized=True
     )
 
@@ -167,16 +167,18 @@ def visualize_price_surface_final(csv_file):
         
         # Z-ORDER LOGIC
         dot_zorder = 10 if is_above else 1
-        color_above, color_below = "#FFE065", "#2B1600"
+        color_above, color_below = "#FFE065", "#231D00"
 
         # Draw the drop-lines
-        line_color = color_above if is_above else color_below
+        line_color = color_above if (is_above or is_exposed) else color_below
+        alpha = 0.65 if is_above else 0.95
+        current_color_needle = "white" if (is_above or is_exposed) else color_below
         ax.plot([m_mkt, m_mkt], [t_mkt, t_mkt], [rel_mod, rel_mkt], 
-                color=line_color, linestyle='-', linewidth=0.8, alpha=0.4, zorder=dot_zorder)
+                color=current_color_needle, linestyle='-', linewidth=0.8, alpha=alpha, zorder=dot_zorder)
 
         if not is_above and not is_exposed:
             # COMPLETELY HIDDEN
-            ax.plot([m_mkt], [t_mkt], [rel_mkt], marker='o', linestyle='None', color="#322500FF", 
+            ax.plot([m_mkt], [t_mkt], [rel_mkt], marker='o', linestyle='None', color="#231D00", 
                     markersize=4.62, markeredgecolor='none', alpha=1.0, zorder=dot_zorder)
             ax.plot([m_mkt], [t_mkt], [rel_mkt], marker='o', linestyle='None', color="#231D00", 
                     markersize=4.62, markeredgecolor='none', alpha=0.5, zorder=9)
@@ -268,7 +270,8 @@ def visualize_price_surface_final(csv_file):
               frameon=True, facecolor=(0.95, 0.95, 0.95), labelcolor="black", edgecolor='none', fontsize=10)
     for h in leg.legendHandles:
         h.set_edgecolor("black")
-        h.set_linewidth(0.1)
+        h.set_linewidth(0.01)
+        h.set_alpha(1)
         
     # --- 10. VIBRANT COLORBAR ---
     cb_values = np.linspace(vmax, vmin, 256)
@@ -282,6 +285,8 @@ def visualize_price_surface_final(csv_file):
     cbar = fig.colorbar(m, ax=ax, shrink=0.5, aspect=15, pad=-0.02)
     cbar.ax.clear()
     cbar.ax.imshow(cb_rgba_final, aspect='auto', extent=[0, 1, vmin, vmax], origin='upper', interpolation='bilinear')
+    cbar.ax.xaxis.set_visible(False)
+    cbar.ax.set_frame_on(False)
     cbar.ax.set_title("Model / $S_0$", color="black", fontsize=10, pad=9)
     cbar.outline.set_visible(False)
     cbar.locator = FixedLocator(np.arange(0.0, 0.12, 0.02))

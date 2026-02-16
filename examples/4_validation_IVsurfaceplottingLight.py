@@ -290,13 +290,13 @@ def plot_surface_professional(S0, r_curve, q_curve, params, ticker, filename, ma
 
     LOWER_M, UPPER_M = 0.685, 1.315                    
     LOWER_T, UPPER_T = 0.04, 1.5 
-    GRID_DENSITY =  50 # 550# 550 #80
+    GRID_DENSITY =  200 # 550# 550 #80
 
     print(f"-> Generating Surface for: {ticker}")
     print(f"   Model: {'Bates' if is_bates else 'Heston'}")
     print(f"   Calculating true gradient-based adaptive mesh...")
     
-    COARSE_N = 50 # 120 #80  150
+    COARSE_N = 100 #80 # 120 #80  150
     c_M = np.linspace(LOWER_M, UPPER_M, COARSE_N)
     c_T = np.linspace(LOWER_T, UPPER_T, COARSE_N)
     cX, cY = np.meshgrid(c_M, c_T)
@@ -457,21 +457,34 @@ def plot_surface_professional(S0, r_curve, q_curve, params, ticker, filename, ma
                         alpha=current_alpha,       # Solid, no-nonsense core
                         zorder=dot_zorder + 1, label=lbl)
             is_spx = "SPX" in filename.upper()
-            condition1 = ((t_mkt < 0.06) & (m_mkt < 1.05 )&  (not is_spx) & (iv_mkt < 0.2656))
-            condition2 = ((t_mkt < 0.06) & (m_mkt < 1.03 )&  (is_spx) & (iv_mkt < 0.1205))
-            if condition1 | condition2: 
+            condition1a = ((t_mkt < 0.06) & (m_mkt < 1.05 )&  (not is_spx) & (iv_mkt < 0.2656) & (not is_above)) 
+            condition1b = ((iv_mkt > 0.2) & (iv_mkt < 0.35) &  (t_mkt < 0.06) & (not is_spx) & (not is_above))
+            condition2a = ((t_mkt < 0.06) & (m_mkt < 1.03 )&  (is_spx) & (iv_mkt < 0.1205) & (not is_above))
+            condition2b = ((iv_mkt < 0.22) & (iv_mkt > 0.18) & (m_mkt < 1 )& (t_mkt < 0.1) &  (is_spx) & (not is_above))
+            if condition1a | condition1b |  condition2a | condition2b: 
                 ax.plot([m_mkt], [t_mkt], [iv_mkt], 
                     marker='o', linestyle='None', color="#FFE065", 
                     markersize=4.62,
                     markerfacecolor="#FFE065", markeredgecolor='none',
                     alpha=alpha_above ,       # Solid, no-nonsense core
                     zorder=dot_zorder + 1)
-                ax.plot([m_mkt+0.001], [t_mkt + 0.001], [iv_mkt - 0.004], 
-                        marker='o', linestyle='None', color="#140B00", 
-                        markersize=4.62, markeredgecolor='none', # Slightly larger than the core
-                        alpha=0.6,       # Effectively "punches" a hole in the blue surface
-                        zorder=9)
-                continue
+                if condition1a or condition2a: 
+                    ax.plot([m_mkt+0.001], [t_mkt + 0.001], [iv_mkt - 0.004], 
+                            marker='o', linestyle='None', color="#140B00", 
+                            markersize=4.62, markeredgecolor='none', # Slightly larger than the core
+                            alpha=0.6,       # Effectively "punches" a hole in the blue surface
+                            zorder=9)
+                    continue
+                if condition1b: 
+                    ax.plot([m_mkt+0.001], [t_mkt + 0.005], [iv_mkt - 0.004], 
+                            marker='o', linestyle='None', color="#140B00", 
+                            markersize=4.62, markeredgecolor='none', # Slightly larger than the core
+                            alpha=0.6,       # Effectively "punches" a hole in the blue surface
+                            zorder=9)
+                    continue
+                if condition2b: 
+                    continue
+                
             if not is_above:
                 ax.plot([m_mkt], [t_mkt], [iv_mkt], 
                             marker='o', linestyle='None', color=current_color, 
@@ -481,8 +494,10 @@ def plot_surface_professional(S0, r_curve, q_curve, params, ticker, filename, ma
                             zorder=dot_zorder + 1)
 
             # 1. THE NEEDLE
+            alpha = 0.65 if is_above else 0.95
+            current_color_needle = "white" if is_above else color_below
             ax.plot([m_mkt, m_mkt], [t_mkt, t_mkt], [iv_mod_exact, iv_mkt], 
-                    color=current_color, linestyle='-', linewidth=0.8, alpha=0.4, zorder=dot_zorder)
+                    color=current_color_needle, linestyle='-', linewidth=0.8, alpha=alpha, zorder=dot_zorder)
 
             # 2. THE "SILENCING HALO" (The Punch-Through)
             # We plot a slightly larger dot in WHITE with a higher alpha.
@@ -527,11 +542,15 @@ def plot_surface_professional(S0, r_curve, q_curve, params, ticker, filename, ma
 
     if market_options and valid_needles > 0:
         # CHANGED: Legend styling to match light theme
-        ax.legend(loc='upper left', bbox_to_anchor=(0.175, 0.79), frameon=True, 
+        scatter_above = ax.scatter([], [], color="#FFE065", label=r"Market IV", s=30)
+        leg = ax.legend(handles = [scatter_above], loc='upper left', bbox_to_anchor=(0.175, 0.79), frameon=True, 
                   facecolor=(0.95, 0.95, 0.95), labelcolor="black", handletextpad=0.5, edgecolor='none', fontsize=10)
+        for h in leg.legendHandles:
+            h.set_edgecolor("black")
+            h.set_linewidth(0.01)
         leg = ax.get_legend()
         for handle in leg.legend_handles:
-            handle.set_alpha(1)
+            handle.set_alpha(0.95)
 
     # --- THE REAL SOLUTION: PURE VIBRANT COLORBAR ---
     cb_values = np.linspace(vmax, vmin, 256)
