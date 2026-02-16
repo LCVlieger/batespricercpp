@@ -47,6 +47,36 @@ def visualize_price_surface_final(csv_file):
     tri = mtri.Triangulation(df['Moneyness'].values, df['T'].values)
     z = df['Model_Rel'].values
 
+    # =========================================================================
+    # THE "PERIMETER PROBE" + "SPINE SNIPING" LOGIC
+    # =========================================================================
+    finder = tri.get_trifinder() 
+    sensitivity = 0.02
+    span_x = df['Moneyness'].max() - df['Moneyness'].min()
+    span_y = df['T'].max() - df['T'].min()
+    r_x, r_y = span_x * sensitivity, span_y * sensitivity
+
+    highest_idx = df['Market_Rel'].idxmax()
+    spine_moneyness = df.loc[highest_idx, 'Moneyness']
+    spine_tolerance = 0.03
+
+    xs, ys = df['Moneyness'].values, df['T'].values
+    
+    mask_c = finder(xs, ys) == -1
+    mask_r = finder(xs + r_x, ys) == -1
+    mask_l = finder(xs - r_x, ys) == -1
+    mask_u = finder(xs, ys + r_y) == -1
+    mask_d = finder(xs, ys - r_y) == -1
+    mask_spine = (
+        (df['Market_Rel'] > 0.06340) & (df['Market_Rel'] < 0.06343)
+    ) | (
+        (df['Market_Rel'] > 0.06304) & (df['Market_Rel'] < 0.063067)
+    )
+  #np.abs(xs - spine_moneyness - 0.025) <= spine_tolerance
+    
+    # Tag all points that are exposed on the boundary or spine
+    df['is_exposed'] = mask_c | mask_r | mask_l | mask_u | mask_d | mask_spine 
+
     # --- 4. MICRO-MESH REFINEMENT (Fixed for Exact Flat Planes) ---
     # By explicitly using a LinearTriInterpolator, the subdivided micro-triangles 
     # will lie EXACTLY on the flat planes of the original triangles. 
@@ -90,32 +120,81 @@ def visualize_price_surface_final(csv_file):
     m = cm.ScalarMappable(cmap=my_cmap, norm=norm)
     m.set_array([])
     
-    # --- 8. POINT STYLING ---
+    # --- 8. POINT STYLING (Boundary Below Graph Logic) ---
+# --- 8. POINT STYLING (Boundary Below Graph Logic) ---
     for _, row in df.iterrows():
         m_mkt, t_mkt, rel_mkt, rel_mod = row['Moneyness'], row['T'], row['Market_Rel'], row['Model_Rel']
+        
         is_above = rel_mkt >= rel_mod
+        is_exposed = row['is_exposed']
+        
+        # Z-ORDER LOGIC: High if physically ABOVE the surface, low if BELOW.
+        dot_zorder = 10 if is_above else 1
+        
+        color_above, color_below = "#FFE065", "#2B1600"
+        
+# --- PRE-CALCULATE CENTER FOR THE INWARD SHIFT ---
+    center_m = (LOWER_M + UPPER_M) / 2.0
+    center_t = (LOWER_T + UPPER_T) / 2.0
+    span_m = UPPER_M - LOWER_M
+    span_t = UPPER_T - LOWER_T
+
+    # --- 8. POINT STYLING (Boundary Below Graph Logic) ---
+    for _, row in df.iterrows():
+        m_mkt, t_mkt, rel_mkt, rel_mod = row['Moneyness'], row['T'], row['Market_Rel'], row['Model_Rel']
+        
+        is_above = rel_mkt >= rel_mod
+        is_exposed = row['is_exposed']
+        
+        # Z-ORDER LOGIC
         dot_zorder = 10 if is_above else 1
         color_above, color_below = "#FFE065", "#2B1600"
-        current_color = color_above if is_above else color_below
 
+        # Draw the drop-lines
+        line_color = color_above if is_above else color_below
         ax.plot([m_mkt, m_mkt], [t_mkt, t_mkt], [rel_mod, rel_mkt], 
-                color=current_color, linestyle='-', linewidth=0.8, alpha=0.4, zorder=dot_zorder)
+                color=line_color, linestyle='-', linewidth=0.8, alpha=0.4, zorder=dot_zorder)
 
-        if not is_above:
-            ax.plot([m_mkt], [t_mkt], [rel_mkt], 
-                        marker='o', linestyle='None', color="#322500FF", 
-                        markersize=4.62, markeredgecolor='none', # Slightly larger than the core
-                        alpha=1.0,       # Effectively "punches" a hole in the blue surface
-                        zorder=dot_zorder)
-            ax.plot([m_mkt], [t_mkt], [rel_mkt], 
-                        marker='o', linestyle='None', color="#231D00", 
-                        markersize=4.62, markeredgecolor='none', # Slightly larger than the core
-                        alpha=0.5,       # Effectively "punches" a hole in the blue surface
-                        zorder=9)
+        # Draw the dark punch-through halos ONLY for hidden points
+        if not is_above and not is_exposed:
+            ax.plot([m_mkt], [t_mkt], [rel_mkt], marker='o', linestyle='None', color="#322500FF", 
+                    markersize=4.62, markeredgecolor='none', alpha=1.0, zorder=dot_zorder)
+            ax.plot([m_mkt], [t_mkt], [rel_mkt], marker='o', linestyle='None', color="#231D00", 
+                    markersize=4.62, markeredgecolor='none', alpha=0.5, zorder=9)
             
-        ax.plot([m_mkt], [t_mkt], [rel_mkt], marker='o', linestyle='None', color=current_color, 
-                markersize=4.62, markerfacecolor=current_color, markeredgecolor='none',
-                alpha=0.98 if is_above else 1.0, zorder=dot_zorder + 1)
+            # Main hidden dot
+            ax.plot([m_mkt], [t_mkt], [rel_mkt], marker='o', linestyle='None', 
+                    markerfacecolor=color_below, markeredgecolor='none', markersize=4.62, alpha=1.0, zorder=dot_zorder)
+
+        elif is_above:
+            # Main fully visible dot
+            ax.plot([m_mkt], [t_mkt], [rel_mkt], marker='o', linestyle='None', 
+                    markerfacecolor=color_above, markeredgecolor='none', markersize=4.62, alpha=0.98, zorder=dot_zorder)
+
+        elif is_exposed:
+            # THE SHIFT METHOD (Boundary Below Graph)
+            
+            # 1. Base Gold Dot exactly at the point
+            ax.plot([m_mkt], [t_mkt], [rel_mkt], marker='o', linestyle='None', 
+                    markerfacecolor=color_above, markeredgecolor='none', markersize=4.62, alpha=1.0, zorder=dot_zorder)
+            
+            # 2. Calculate vector toward the center of the grid
+            dir_m = center_m - m_mkt
+            dir_t = center_t - t_mkt
+            dist = np.sqrt((dir_m/span_m)**2 + (dir_t/span_t)**2)
+            
+            # Tweak this multiplier to control how far inside the black dot shifts
+            shift_amount = 0.009 #012 
+            
+            if dist > 0:
+                m_shifted = m_mkt + (dir_m / dist) * shift_amount * span_m
+                t_shifted = t_mkt + (dir_t / dist) * shift_amount * span_t
+            else:
+                m_shifted, t_shifted = m_mkt, t_mkt
+                
+            # 3. Masking Dark Dot shifted inward (plotted on top of gold, but under mesh)
+            ax.plot([m_shifted], [t_shifted], [rel_mkt], marker='o', linestyle='None', 
+                    markerfacecolor="#231D00", markeredgecolor='none', markersize=4.62, alpha=0.5, zorder=10)
 
     # --- 9. AXES & POLISH ---
     ax.dist = 11  
@@ -132,11 +211,13 @@ def visualize_price_surface_final(csv_file):
         axis.set_pane_color((0.95, 0.95, 0.95, 1.0)) 
         axis._axinfo["grid"].update({'color': (0.68, 0.68, 0.68, 0.5), 'linewidth': 0.575})
 
-    scatter_above = ax.scatter([], [], color="#FFE065", label=r"Market $\geq$ Model", s=30)
+    scatter_above = ax.scatter([], [], color="#FFE065", label=r"Market / $S_0$", s=30)
     scatter_below = ax.scatter([], [], color="#2B1600", label="Market < Model", s=30)
-    ax.legend(handles=[scatter_above, scatter_below], loc='upper left', bbox_to_anchor=(0.09935, 0.7774), 
+    leg = ax.legend(handles=[scatter_above], loc='upper left', bbox_to_anchor=(0.09935, 0.7774), 
               frameon=True, facecolor=(0.95, 0.95, 0.95), labelcolor="black", edgecolor='none', fontsize=10)
-
+    for h in leg.legendHandles:
+        h.set_edgecolor("black")
+        h.set_linewidth(0.1)
     # --- 10. VIBRANT COLORBAR ---
     cb_values = np.linspace(vmax, vmin, 256)
     cb_base_colors = my_cmap(norm(cb_values)) 
