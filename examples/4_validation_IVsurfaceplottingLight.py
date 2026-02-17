@@ -92,7 +92,7 @@ def get_premium_style():
     return mcolors.ListedColormap(new_colors, name='Nordic_Warped')
 
 
-def create_premium_cmap_1():
+def create_premium_cmap_2   ():
     """
     'Neon Surface' Colormap.
     Specifically calibrated for Black Backgrounds.
@@ -129,7 +129,41 @@ def create_premium_cmap_1():
     warped_values = values ** gamma 
     return cmap
 
-
+def create_premium_cmap_1():
+    """
+    'Matte Premium' Colormap.
+    Over-brightened to survive the aggressive darkening of 3D shading.
+    """
+    # 1. Over-brightened Hex Codes
+    colors = [
+        "#000F3B",  # Base Blue (Lifted so it doesn't turn pitch black in shadows)
+        "#1D408B",  # Vibrant Royal Blue (Replaces the Slate)
+        "#367BDCFF",  # Bright Cyan (Crucial for bringing back the miSd-level 'glow')
+        "#AFDFFF",  # Ice White
+        "#C8E9FF"   # Pure White (Forces the peaks to shine even under matte shading)
+    ]
+        
+        #colors = [
+       # "#000F3B",  # Base Blue (Lifted so it doesn't turn pitch black in shadows)
+       # "#1D3F88",  # Vibrant Royal Blue (Replaces the Slate)
+       # "#3F82DFFF",  # Bright Cyan (Crucial for bringing back the miSd-level 'glow')
+       # "#AFDFFF",  # Ice White
+       # "#C8E9FF"   # Pure White (Forces the peaks to shine even under matte shading)
+    #]
+    # 2. Push the brighter colors further down the slopes
+    nodes = [0.0, 0.1, 0.45, 0.8, 1.0]
+    
+    base_cmap = mcolors.LinearSegmentedColormap.from_list("PremiumMatte", list(zip(nodes, colors)))
+    
+    # 3. Apply the Gamma Warping (and actually return it this time!)
+    gamma = 1.1 # A gamma < 1 stretches the bright cyan downward to fight the shadows
+    N = 256
+    values = np.linspace(0, 1.0, N)
+    
+    warped_values = values ** gamma 
+    new_colors = base_cmap(warped_values)
+    
+    return mcolors.ListedColormap(new_colors, name="PremiumMatte_Warped")
 
 def create_mint_surface_cmap():
     """
@@ -290,13 +324,13 @@ def plot_surface_professional(S0, r_curve, q_curve, params, ticker, filename, ma
 
     LOWER_M, UPPER_M = 0.685, 1.315                    
     LOWER_T, UPPER_T = 0.04, 1.5 
-    GRID_DENSITY =  120 #250 #250 # 550# 550 #80
+    GRID_DENSITY =  550 #250 #250 # 550# 550 #80
 
     print(f"-> Generating Surface for: {ticker}")
     print(f"   Model: {'Bates' if is_bates else 'Heston'}")
     print(f"   Calculating true gradient-based adaptive mesh...")
     
-    COARSE_N =  50 #150#150  #80 # 120 #80  150
+    COARSE_N = 150 #150#150  #80 # 120 #80  150
     c_M = np.linspace(LOWER_M, UPPER_M, COARSE_N)
     c_T = np.linspace(LOWER_T, UPPER_T, COARSE_N)
     cX, cY = np.meshgrid(c_M, c_T)
@@ -436,7 +470,7 @@ def plot_surface_professional(S0, r_curve, q_curve, params, ticker, filename, ma
  # --- COLOR DEFINITIONS ---
  # --- COLOR DEFINITIONS (No Glow) ---
             # Above: A clean, solid "International Orange" that pops against light blue
-            color_above = "#E8DBA6"#"#winner: F5E5A8"  winner: "#F3E5AB""#FFE065" #"#FFDD6B" "#FFE065" "#F2E2A4" "#EFE0A5""#EADCA6" "#E8DBA6" 
+            color_above = "#ECE7D3"#"#winner: F5E5A8"  winner: "#EADCA6" "#E8DBA6" 
             # Below: A very dark "Prussian Blue" or "Charcoal" 
             # This provides the best contrast against the light blue surface from underneath
             color_below =  "#2B1600"
@@ -535,16 +569,17 @@ def plot_surface_professional(S0, r_curve, q_curve, params, ticker, filename, ma
     ax.view_init(elev=28, azim=-115) 
 
     # --- CHANGED: Label colors to black ---
-    ax.set_xlabel('Moneyness ($K/S_0$)', color="black", labelpad=5, fontsize=11)
-    ax.set_ylabel('Maturity ($T$ Years)', color="black", labelpad=5, fontsize=11)
-    ax.set_zlabel(r'Implied Volatility', color="black", labelpad=6.75, fontsize=11)
-    ax.tick_params(axis='both', which='major', colors='black', labelsize=10)
-
+    ax.set_xlabel('Moneyness ($K/S_0$)', color="black", labelpad=2.5, fontsize=13)
+    ax.set_ylabel('Maturity ($T$ Years)', color="black", labelpad=9.75, fontsize=13)
+    ax.set_zlabel(r'Implied Volatility', color="black", labelpad=11.75, fontsize=13)
+    ax.tick_params(axis='both', which='major', colors='black', labelsize=12)
+    ax.tick_params(axis='z', which='major', pad=6)
+    ax.tick_params(axis='x', which='major', pad=-1)
     if market_options and valid_needles > 0:
         # CHANGED: Legend styling to match light theme
         scatter_above = ax.scatter([], [], color=color_above, label=r"Market IV", s=30)
         leg = ax.legend(handles = [scatter_above], loc='upper left', bbox_to_anchor=(0.175, 0.79), frameon=True, 
-                  facecolor=(0.95, 0.95, 0.95), labelcolor="black", handletextpad=0.5, edgecolor='none', fontsize=10)
+                  facecolor=(0.95, 0.95, 0.95), labelcolor="black", handletextpad=0.5, edgecolor='none', fontsize=13)
         for h in leg.legendHandles:
             h.set_edgecolor("black")
             h.set_linewidth(0.01)
@@ -572,16 +607,16 @@ def plot_surface_professional(S0, r_curve, q_curve, params, ticker, filename, ma
     cbar.ax.imshow(cb_rgba_final, aspect='auto', extent=[0, 1, vmin, vmax], 
                    origin='upper', interpolation='bilinear')
     
-    cbar.ax.set_rasterized(True) 
+    cbar.ax.set_rasterized(False) 
     cbar.ax.xaxis.set_visible(False)
     cbar.ax.set_frame_on(False)
 
     cbar.locator = FixedLocator(np.arange(0.1, 0.8, 0.1))
     cbar.update_ticks()
     # --- CHANGED: Colorbar ticks and title to black ---
-    cbar.ax.yaxis.set_tick_params(color="black", labelcolor="black", labelsize=10, width=0.5)
+    cbar.ax.yaxis.set_tick_params(color="black", labelcolor="black", labelsize=12, width=0.5)
     cbar.outline.set_visible(False)
-    cbar.ax.set_title("Model IV", color="black", fontsize=10, pad=9)
+    cbar.ax.set_title("Model IV", color="black", fontsize=13, pad=9)
     
     fig.subplots_adjust(top=0.98, bottom=0.02, left=0.02, right=0.98)
 

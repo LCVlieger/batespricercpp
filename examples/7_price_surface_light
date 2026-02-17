@@ -16,6 +16,43 @@ from mpl_toolkits.mplot3d import proj3d
 
 def create_premium_cmap_1():
     """
+    'Matte Premium' Colormap.
+    Over-brightened to survive the aggressive darkening of 3D shading.
+    """
+    # 1. Over-brightened Hex Codes
+    colors = [
+        "#000F3B",  # Base Blue (Lifted so it doesn't turn pitch black in shadows)
+        "#1D408B",  # Vibrant Royal Blue (Replaces the Slate)
+        "#367BDCFF",  # Bright Cyan (Crucial for bringing back the miSd-level 'glow')
+        "#AFDFFF",  # Ice White
+        "#C8E9FF"   # Pure White (Forces the peaks to shine even under matte shading)
+    ]
+        
+        #colors = [
+       # "#000F3B",  # Base Blue (Lifted so it doesn't turn pitch black in shadows)
+       # "#1D3F88",  # Vibrant Royal Blue (Replaces the Slate)
+       # "#3F82DFFF",  # Bright Cyan (Crucial for bringing back the miSd-level 'glow')
+       # "#AFDFFF",  # Ice White
+       # "#C8E9FF"   # Pure White (Forces the peaks to shine even under matte shading)
+    #]
+    # 2. Push the brighter colors further down the slopes
+    nodes = [0.0, 0.1, 0.45, 0.8, 1.0]
+    
+    base_cmap = mcolors.LinearSegmentedColormap.from_list("PremiumMatte", list(zip(nodes, colors)))
+    
+    # 3. Apply the Gamma Warping (and actually return it this time!)
+    gamma = 1.1 # A gamma < 1 stretches the bright cyan downward to fight the shadows
+    N = 256
+    values = np.linspace(0, 1.0, N)
+    
+    warped_values = values ** gamma 
+    new_colors = base_cmap(warped_values)
+    
+    return mcolors.ListedColormap(new_colors, name="PremiumMatte_Warped")
+
+
+def create_premium_cmap_2():
+    """
     'Neon Surface' Colormap.
     """
     colors = ["#091D57", "#2B66BF", "#2E88CD", "#9BDEF2", "#C2ECF7"]
@@ -167,7 +204,7 @@ def visualize_price_surface_final(csv_file):
         
         # Z-ORDER LOGIC
         dot_zorder = 10 if is_above else 1
-        color_above, color_below ="#E8DBA6","#231D00"  #"#F3E5AB" ,"#231D00"  # "#FFE065", "#231D00"
+        color_above, color_below ="#ECE7D3","#231D00"  #"#F3E5AB" ,"#231D00"  # "#FFE065", "#231D00" "#EAE1BC"
 
         # Draw the drop-lines
         line_color = color_above if (is_above or is_exposed) else color_below
@@ -256,18 +293,20 @@ def visualize_price_surface_final(csv_file):
     ax.set_zlim(0.0, vmax)
     ax.view_init(elev=28, azim=-115) 
 
-    ax.set_xlabel('Moneyness ($K/S_0$)', color="black", labelpad=5, fontsize=11)
-    ax.set_ylabel('Maturity ($T$ Years)', color="black", labelpad=5, fontsize=11)
-    ax.set_zlabel(r'Relative Price ($C/S_0$)', color="black", labelpad=6.75, fontsize=11)
+    ax.set_xlabel('Moneyness ($K/S_0$)', color="black", labelpad=2.5, fontsize=13)
+    ax.set_ylabel('Maturity ($T$ Years)', color="black", labelpad=9.75, fontsize=13)
+    ax.set_zlabel(r'Relative Price ($C/S_0$)', color="black", labelpad=11.75, fontsize=13)
     
     for axis in [ax.xaxis, ax.yaxis, ax.zaxis]:
         axis.set_pane_color((0.95, 0.95, 0.95, 1.0)) 
         axis._axinfo["grid"].update({'color': (0.68, 0.68, 0.68, 0.5), 'linewidth': 0.575})
 
-    scatter_above = ax.scatter([], [], color="#FFE065", label=r"Market / $S_0$", s=30)
+    scatter_above = ax.scatter([], [], color="#ECE7D3", label=r"Market / $S_0$", s=30)
     scatter_below = ax.scatter([], [], color="#2B1600", label="Market < Model", s=30)
-    leg = ax.legend(handles=[scatter_above], loc='upper left', bbox_to_anchor=(0.09935, 0.7774), 
-              frameon=True, facecolor=(0.95, 0.95, 0.95), labelcolor="black", edgecolor='none', fontsize=10)
+    leg = ax.legend(handles=[scatter_above], loc='upper left', bbox_to_anchor=(0.07935, 0.7785), 
+              frameon=True, facecolor=(0.95, 0.95, 0.95), labelcolor="black", edgecolor='none', fontsize=13)
+    ax.tick_params(axis='z', which='major', pad=6)
+    ax.tick_params(axis='x', which='major', pad=-1)
     for h in leg.legendHandles:
         h.set_edgecolor("black")
         h.set_linewidth(0.01)
@@ -287,13 +326,14 @@ def visualize_price_surface_final(csv_file):
     cbar.ax.imshow(cb_rgba_final, aspect='auto', extent=[0, 1, vmin, vmax], origin='upper', interpolation='bilinear')
     cbar.ax.xaxis.set_visible(False)
     cbar.ax.set_frame_on(False)
-    cbar.ax.set_title("Model / $S_0$", color="black", fontsize=10, pad=9)
+    cbar.ax.set_title("Model / $S_0$", color="black", fontsize=13, pad=9)
     cbar.outline.set_visible(False)
     cbar.locator = FixedLocator(np.arange(0.0, 0.12, 0.02))
     cbar.update_ticks()
 
     fig.subplots_adjust(top=0.98, bottom=0.02, left=0.02, right=0.98)
-
+    ax.tick_params(axis='both', which='major', labelsize=12, colors='black')
+    cbar.ax.yaxis.set_tick_params(labelsize=12, color="black", labelcolor="black")
     save_path = csv_file.replace(".csv", "_FINAL_TRIMESH.pdf")
     plt.savefig(save_path, format='pdf', bbox_inches='tight', pad_inches=0.15, facecolor='white', dpi=800)
     #plt.show()
