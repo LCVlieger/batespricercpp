@@ -39,39 +39,41 @@ class BatesAnalyticalPricer:
 
         def get_cf(phi):
             xi_s = np.maximum(xi, 1e-6)
-            # Complex component d
-            d = np.sqrt((rho * xi_s * phi * 1j - kappa)**2 + xi_s**2 * (phi * 1j + phi**2))
             
-            # Catch NaN in d (High xi/rho instability)
+            # Complex component d (Matches LaTeX exactly)
+            d = np.sqrt((kappa - rho * xi_s * phi * 1j)**2 + xi_s**2 * (phi * 1j + phi**2))
+            
             if np.any(np.isnan(d)):
                 print(f"CRITICAL: NaN in 'd' (Complex Square Root). Parameters likely out of bounds.")
 
             g = (kappa - rho * xi_s * phi * 1j - d) / (kappa - rho * xi_s * phi * 1j + d)
             e_neg_dT = np.exp(-d * T_mat)
             
-            C = (1/xi_s**2) * ((1 - e_neg_dT) / (1 - g * e_neg_dT)) * (kappa - rho * xi_s * phi * 1j - d)
+            # D matches LaTeX D(i Phi, T) - Multiplies v0
+            D = ((kappa - rho * xi_s * phi * 1j - d) / xi_s**2) * ((1 - e_neg_dT) / (1 - g * e_neg_dT))
             
-            # Albrecher (2007) Stable Formulation
-            log_arg = (1 - e_neg_dT * g) / (1 - g + 1e-15)
-            D = (kappa * theta / xi_s**2) * ((kappa - rho * xi_s * phi * 1j - d) * T_mat - 2 * np.log(log_arg))
+            # C matches LaTeX C(i Phi, T) - Independent term including drift
+            log_arg = (1 - g * e_neg_dT) / (1 - g + 1e-15)
+            C = phi * 1j * (r_mat - q_mat) * T_mat + (kappa * theta / xi_s**2) * ((kappa - rho * xi_s * phi * 1j - d) * T_mat - 2 * np.log(log_arg))
             
             # Merton Jump Component
             k_bar = np.exp(mu_j + 0.5 * sigma_j**2) - 1
-            e_i_phi_J = np.exp(1j * phi * mu_j - 0.5 * sigma_j**2 * phi**2)
-            jump_part = lamb * T_mat * (e_i_phi_J - 1 - 1j * phi * k_bar)
+            jump_part = lamb * T_mat * (np.exp(1j * phi * mu_j - 0.5 * sigma_j**2 * phi**2) - 1 - 1j * phi * k_bar)
             
-            cf = np.exp(C * v0 + D + 1j * phi * np.log(F_mat) + jump_part)
+            # CF for X_T = log(S_T / S_0)
+            cf_XT = np.exp(C + D * v0 + jump_part)
             
-            if np.any(np.isnan(cf)):
+            if np.any(np.isnan(cf_XT)):
                  print(f"CRITICAL: NaN in Characteristic Function. Log or Division by Zero error.")
             
-            return cf
+            return cf_XT
 
+        # Evaluate CF for log-returns
         cf_p1, cf_p2 = get_cf(u - 1j), get_cf(u)
         
-        int_p1 = np.real((np.exp(-1j * u * np.log(K_mat)) * cf_p1) / (1j * u * F_mat))
-        int_p2 = np.real((np.exp(-1j * u * np.log(K_mat)) * cf_p2) / (1j * u))
-
+        # Integration mapping 1:1 to your LaTeX P1 and P2 formulas
+        int_p1 = np.real((cf_p1 * np.exp(-1j * u * np.log(K_mat / S0) - (r_mat - q_mat) * T_mat)) / (1j * u))
+        int_p2 = np.real((cf_p2 * np.exp(-1j * u * np.log(K_mat / S0))) / (1j * u))
         # 2. NUMERICAL INTEGRITY CHECKS
         tail_magnitude = np.max(np.abs(int_p2[-1, :]))
         if tail_magnitude > 1e-4:

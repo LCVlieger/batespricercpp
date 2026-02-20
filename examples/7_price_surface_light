@@ -295,7 +295,7 @@ def visualize_price_surface_final(csv_file):
 
     ax.set_xlabel('Moneyness ($K/S_0$)', color="black", labelpad=2.5, fontsize=13)
     ax.set_ylabel('Maturity ($T$ Years)', color="black", labelpad=9.75, fontsize=13)
-    ax.set_zlabel(r'Relative Price ($C/S_0$)', color="black", labelpad=11.75, fontsize=13)
+    ax.set_zlabel(r'Relative Price ($c/S_0$)', color="black", labelpad=11.75, fontsize=13)
     
     for axis in [ax.xaxis, ax.yaxis, ax.zaxis]:
         axis.set_pane_color((0.95, 0.95, 0.95, 1.0)) 
