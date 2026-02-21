@@ -233,7 +233,9 @@ def main():
         
     t0 = time.time()
     res = minimize(objective, x0, method='SLSQP', bounds=bounds, callback=callback, tol=1e-8, options={'maxiter': 500, 'eps': 3e-3}) #was -2 5e-3 beste met 5k 5k
-    
+    t1 = time.time() 
+    print(f"Calibration time: ")
+    print(t1 - t0)
     print(f"CALIBRATION DONE (Time: {time.time()-t0:.2f}s)")
     
     final_params = dict(zip(['kappa', 'theta', 'xi', 'rho', 'v0', 'lamb', 'mu_j', 'sigma_j'], res.x))

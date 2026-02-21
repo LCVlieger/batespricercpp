@@ -165,7 +165,7 @@ def main():
     else:
         raw_df = fetch_raw_data(ticker)
         S0_actual = get_market_implied_spot(ticker, raw_df, r_curve)
-        options_processed = fetch_options(ticker, S0_actual, target_size=150)
+        options_processed = fetch_options(ticker, S0_actual, target_size=300)
         
         # SAVE IT FOR TOMORROW
         save_options_to_cache(options_processed, ticker)
@@ -189,7 +189,9 @@ def main():
     
     calib_analytic = BatesCalibrator(S0=S0_actual, r_curve=r_curve, q_curve=q_curve)
     res_a = calib_analytic.calibrate(options_processed)
-    
+    t1 = time.time()
+    print(f"Calibration time: ")
+    print(t1 - t0)
     print(f"CALIBRATION RESULTS (Time: {time.time()-t0:.2f}s)")
     print(f"Obj (Weighted): {res_a.get('weighted_obj', 0):.4f} | RMSE (Price): {res_a.get('rmse', 0):.4f}")
     

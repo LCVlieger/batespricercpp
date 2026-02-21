@@ -27,7 +27,7 @@ class BatesAnalyticalPricer:
             #print(f"--- Bates Engine Active: xi={xi:.4f}, v0={v0:.4f}, lamb={lamb:.4f} ---")
 
         # 1. INTEGRATION SETUP
-        N_grid, u_limit = 8000, 10000.0 
+        N_grid, u_limit =  296, 10000 #  8000, 10000.0 
         u_linear = np.linspace(0, 1, N_grid + 1)
         u = (u_linear**2 * u_limit)[:, np.newaxis]
         u[0] = 1e-12 
@@ -128,6 +128,141 @@ class BatesAnalyticalPricer:
     @staticmethod
     def price_european_put(S0, K, T, r, q, kappa, theta, xi, rho, v0, lamb, mu_j, sigma_j, silent=True):
         res = BatesAnalyticalPricer.price_vectorized(
+            S0, np.atleast_1d(K), np.atleast_1d(T), np.atleast_1d(r), np.atleast_1d(q), 
+            np.array(["PUT"]), kappa, theta, xi, rho, v0, lamb, mu_j, sigma_j, silent=silent
+        )
+        return float(res[0])
+    
+
+import numpy.polynomial.legendre as leg
+
+class BatesAnalyticalPricerFast:
+    @staticmethod
+    def price_vectorized(S0, K, T, r, q, types, kappa, theta, xi, rho, v0, lamb, mu_j, sigma_j, silent=True):
+        """
+        Ultra-fast Analytical pricer for the Bates model.
+        Uses Gauss-Legendre Quadrature and Maturity-based Characteristic Function caching.
+        """
+        K = np.atleast_1d(K)
+        T = np.atleast_1d(T)
+        r = np.atleast_1d(r)
+        q = np.atleast_1d(q)
+        types = np.atleast_1d(types)
+        
+        # 1. GAUSS-LEGENDRE QUADRATURE SETUP
+        # 150 nodes is extremely accurate for smooth characteristic functions
+        N_nodes = 126
+        u_max = 300.0  # Truncation limit for the integral
+        
+        nodes, weights = leg.leggauss(N_nodes)
+        # Map nodes from [-1, 1] to [0, u_max]
+        u = 0.5 * u_max * (nodes + 1)
+        du = 0.5 * u_max * weights
+        
+        # Open-quadrature naturally avoids u=0, but we add a safeguard
+        u = np.maximum(u, 1e-12)
+        
+        # 2. GROUP BY MATURITY (CACHING ENGINE)
+        # We only evaluate the Characteristic Function once per unique T.
+        unique_T_indices = {}
+        for i, t_val in enumerate(T):
+            if t_val not in unique_T_indices:
+                unique_T_indices[t_val] = []
+            unique_T_indices[t_val].append(i)
+            
+        prices = np.zeros(len(K))
+        xi_s = np.maximum(xi, 1e-6)
+        k_bar = np.exp(mu_j + 0.5 * sigma_j**2) - 1
+        
+        # Characteristic Function Logic (Isolated for caching)
+        def eval_cf(phi, t_val, r_val, q_val):
+            d = np.sqrt((kappa - rho * xi_s * phi * 1j)**2 + xi_s**2 * (phi * 1j + phi**2))
+            
+            if not silent and np.any(np.isnan(d)):
+                print("CRITICAL: NaN in 'd' (Complex Square Root).")
+
+            g = (kappa - rho * xi_s * phi * 1j - d) / (kappa - rho * xi_s * phi * 1j + d)
+            e_neg_dT = np.exp(-d * t_val)
+            
+            D = ((kappa - rho * xi_s * phi * 1j - d) / xi_s**2) * ((1 - e_neg_dT) / (1 - g * e_neg_dT))
+            
+            log_arg = (1 - g * e_neg_dT) / (1 - g + 1e-15)
+            C = phi * 1j * (r_val - q_val) * t_val + (kappa * theta / xi_s**2) * ((kappa - rho * xi_s * phi * 1j - d) * t_val - 2 * np.log(log_arg))
+            
+            jump_part = lamb * t_val * (np.exp(1j * phi * mu_j - 0.5 * sigma_j**2 * phi**2) - 1 - 1j * phi * k_bar)
+            
+            return np.exp(C + D * v0 + jump_part)
+
+        # 3. EVALUATE PER MATURITY AND BROADCAST ACROSS STRIKES
+        for t_val, idxs in unique_T_indices.items():
+            r_val = r[idxs[0]]
+            q_val = q[idxs[0]]
+            
+            # THE MASSIVE SPEEDUP: CF evaluated exactly twice per maturity slice!
+            cf_p1 = eval_cf(u - 1j, t_val, r_val, q_val)
+            cf_p2 = eval_cf(u, t_val, r_val, q_val)
+            
+            K_slice = K[idxs]
+            F_slice = S0 * np.exp((r_val - q_val) * t_val)
+            is_otm_call = (K_slice > F_slice)
+            
+            # Reshape u arrays to broadcast against strikes (N_nodes, N_strikes)
+            u_col = u[:, np.newaxis]
+            du_col = du[:, np.newaxis]
+            log_K_S = np.log(K_slice / S0)[np.newaxis, :]
+            
+            # P1 Integral (Vectorized over K)
+            term_p1 = (cf_p1[:, np.newaxis] * np.exp(-1j * u_col * log_K_S - (r_val - q_val) * t_val)) / (1j * u_col)
+            P1_sum = np.sum(np.real(term_p1) * du_col, axis=0)
+            P1_val = 0.5 + (1 / np.pi) * P1_sum
+            
+            # P2 Integral (Vectorized over K)
+            term_p2 = (cf_p2[:, np.newaxis] * np.exp(-1j * u_col * log_K_S)) / (1j * u_col)
+            P2_sum = np.sum(np.real(term_p2) * du_col, axis=0)
+            P2_val = 0.5 + (1 / np.pi) * P2_sum
+            
+            # Calculate Out-Of-The-Money base price
+            P1 = np.where(is_otm_call, P1_val, 1.0 - P1_val)
+            P2 = np.where(is_otm_call, P2_val, 1.0 - P2_val)
+            
+            price_otm = np.where(is_otm_call,
+                                 S0 * np.exp(-q_val * t_val) * P1 - K_slice * np.exp(-r_val * t_val) * P2,
+                                 K_slice * np.exp(-r_val * t_val) * P2 - S0 * np.exp(-q_val * t_val) * P1)
+            
+            price_otm = np.maximum(price_otm, 0.0)
+            
+            # Convert back to requested types via Put-Call Parity
+            types_slice = types[idxs]
+            is_put_req = np.array([t.upper() == "PUT" for t in types_slice])
+            
+            adj = S0 * np.exp(-q_val * t_val) - K_slice * np.exp(-r_val * t_val)
+            res = np.copy(price_otm)
+            
+            res = np.where(is_put_req, 
+                           np.where(~is_otm_call, res, res - adj),
+                           np.where(is_otm_call, res, res + adj))
+                           
+            prices[idxs] = res
+
+        return np.nan_to_num(np.maximum(prices, 0.0))
+
+    @staticmethod
+    def price_european_call_vectorized(S0, K, T, r, q, kappa, theta, xi, rho, v0, lamb, mu_j, sigma_j, silent=True):
+        K = np.atleast_1d(K)
+        types = np.array(["CALL"] * len(K))
+        return BatesAnalyticalPricerFast.price_vectorized(
+            S0, K, T, r, q, types, kappa, theta, xi, rho, v0, lamb, mu_j, sigma_j, silent=silent
+        )
+
+    @staticmethod
+    def price_european_call(S0, K, T, r, q, kappa, theta, xi, rho, v0, lamb, mu_j, sigma_j, silent=True):
+        res = BatesAnalyticalPricerFast.price_european_call_vectorized(
+            S0, K, T, r, q, kappa, theta, xi, rho, v0, lamb, mu_j, sigma_j, silent=silent)
+        return float(res[0])
+
+    @staticmethod
+    def price_european_put(S0, K, T, r, q, kappa, theta, xi, rho, v0, lamb, mu_j, sigma_j, silent=True):
+        res = BatesAnalyticalPricerFast.price_vectorized(
             S0, np.atleast_1d(K), np.atleast_1d(T), np.atleast_1d(r), np.atleast_1d(q), 
             np.array(["PUT"]), kappa, theta, xi, rho, v0, lamb, mu_j, sigma_j, silent=silent
         )

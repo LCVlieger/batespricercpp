@@ -1,6 +1,6 @@
 import numpy as np
 from numba import jit
-
+import math
 # --- KERNELS ---
 
 @jit(nopython=True, cache=True, fastmath=True)
@@ -211,3 +211,120 @@ def generate_bates_paths_crn(S0, r, q, v0, kappa, theta, xi, rho, lamb, mu_j, si
         prices[:, j + 1] = curr_s
         
     return prices
+
+
+@jit(nopython=True, cache=True, fastmath=True)
+def generate_bates_qe_slices(S0, r, q, v0, kappa, theta, xi, rho, lamb, mu_j, sigma_j, 
+                             dt, n_paths, n_steps, maturity_step_idxs, 
+                             Z_x, Z_v, U_v, Z_jump, U_jump):
+    """
+    Andersen (2008) Quadratic-Exponential (QE) Scheme for Bates Model.
+    Massive Optimization: Only saves and returns the asset prices at specific Maturity steps!
+    """
+    n_maturities = len(maturity_step_idxs)
+    
+    # OUTPUT MATRIX: Shape (n_paths, n_maturities). 
+    # We NO LONGER save the whole path! Huge memory/speed savings.
+    prices_at_maturities = np.zeros((n_paths, n_maturities))
+    
+    # Compensator for Log-Normal Jumps
+    k_bar = math.exp(mu_j + 0.5 * sigma_j**2) - 1.0
+    drift_base = (r - q - lamb * k_bar) * dt
+    
+    # Precompute QE Constants
+    exp_k = math.exp(-kappa * dt)
+    inv_kappa = 1.0 / kappa
+    c1 = xi**2 * exp_k * inv_kappa * (1.0 - exp_k)
+    c2 = theta * xi**2 * 0.5 * inv_kappa * (1.0 - exp_k)**2
+    
+    # Correlation Constants (Broadie-Kaya approximation)
+    rho_inv_xi = rho / xi
+    sqrt_1_min_rho2 = math.sqrt(1.0 - rho**2)
+    
+    # State tracking
+    curr_v = np.full(n_paths, v0, dtype=np.float64)
+    curr_log_s = np.full(n_paths, math.log(S0), dtype=np.float64)
+    
+    lam_dt = lamb * dt
+    exp_neg_lam = math.exp(-lam_dt)
+    
+    # Track which maturity we are looking for next
+    next_mat_idx = 0
+    target_step = maturity_step_idxs[next_mat_idx]
+    
+    for j in range(1, n_steps + 1):
+        for i in range(n_paths):
+            vt = curr_v[i]
+            
+            # ==========================================
+            # 1. ANDERSEN QE VARIANCE UPDATE
+            # ==========================================
+            m = theta + (vt - theta) * exp_k
+            s2 = vt * c1 + c2
+            psi = s2 / (m**2)
+            
+            v_next = 0.0
+            
+            if psi <= 1.5:
+                # Case 1: High variance (Non-central chi-squared approx)
+                b2 = 2.0 / psi - 1.0 + math.sqrt(2.0 / psi * (2.0 / psi - 1.0))
+                a = m / (1.0 + b2)
+                b = math.sqrt(b2)
+                v_next = a * (b + Z_v[i, j])**2
+            else:
+                # Case 2: Low variance (Dirac-delta + Exponential tail)
+                p = (psi - 1.0) / (psi + 1.0)
+                beta = (1.0 - p) / m
+                u = U_v[i, j]
+                
+                if u > p:
+                    v_next = math.log((1.0 - p) / (1.0 - u)) / beta
+                else:
+                    v_next = 0.0
+                    
+            curr_v[i] = v_next
+            
+            # ==========================================
+            # 2. CORRELATED ASSET UPDATE
+            # ==========================================
+            # Trapezoidal rule for integrated variance
+            V_int = 0.5 * (vt + v_next) * dt 
+            
+            # Correlated Asset Drift + Diffusion (Andersen exact match)
+            # This handles the rho (correlation) without needing a Cholesky matrix!
+            log_s_drift = drift_base - 0.5 * V_int + rho_inv_xi * (v_next - vt - kappa * theta * dt + kappa * V_int)
+            log_s_diff = sqrt_1_min_rho2 * math.sqrt(V_int) * Z_x[i, j]
+            
+            # ==========================================
+            # 3. POISSON JUMP UPDATE
+            # ==========================================
+            u_j = U_jump[i, j]
+            n_jumps = 0
+            p_pois = exp_neg_lam
+            s_pois = p_pois
+            
+            while u_j > s_pois and n_jumps < 10:
+                n_jumps += 1
+                p_pois *= lam_dt / n_jumps
+                s_pois += p_pois
+                
+            jump_mag = 0.0
+            if n_jumps > 0:
+                jump_mag = n_jumps * mu_j + math.sqrt(float(n_jumps)) * sigma_j * Z_jump[i, j]
+            
+            # Finalize log asset
+            curr_log_s[i] += log_s_drift + log_s_diff + jump_mag
+
+        # ==========================================
+        # 4. MATURITY SLICING (The Quant Flex)
+        # ==========================================
+        # If the current step hits a maturity date, save the asset prices!
+        if j == target_step:
+            for i in range(n_paths):
+                prices_at_maturities[i, next_mat_idx] = math.exp(curr_log_s[i])
+            
+            next_mat_idx += 1
+            if next_mat_idx < n_maturities:
+                target_step = maturity_step_idxs[next_mat_idx]
+
+    return prices_at_maturities
