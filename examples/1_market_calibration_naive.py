@@ -6,7 +6,7 @@ import pandas as pd
 import yfinance as yf
 from datetime import datetime
 from scipy.optimize import minimize
-from heston_pricer.calibration import BatesCalibratorMCFast
+from heston_pricer.calibration import BatesCalibratorMC
 from heston_pricer.analytics import BatesAnalyticalPricer, implied_volatility
 from heston_pricer.data import (
     fetch_treasury_rates_fred, 
@@ -188,30 +188,57 @@ def main():
     print(f"\n{'='*20} BATES ANALYTICAL CALIBRATION {'='*20}")
     t0 = time.time()
     
-    calib_analytic = BatesCalibratorMCFast(S0=S0_actual, r_curve=r_curve, q_curve=q_curve)
-    res_a = calib_analytic.calibrate(options_processed)
-    t1 = time.time()
+    mc_calib = BatesCalibratorMC(S0=S0_actual, r_curve=r_curve, q_curve=q_curve, n_paths=5000, n_steps=1000)  #10k10k / 5k5k
+    mc_calib._precompute(options_processed)
+    
+    # 3. Optimization Setup     
+    print(f"\n{'='*20} STARTING MC OPTIMIZATION {'='*20}")
+
+    short_opts = [o for o in options_processed if o.maturity < 0.1]
+    closest = min(short_opts, key=lambda x: abs(x.strike - S0_actual))
+
+    implied_v0_root = implied_volatility(closest.market_price, S0_actual, closest.strike, closest.maturity, r_curve.get_rate(closest.maturity), q_curve.get_rate(closest.maturity), closest.option_type)
+    fixed_v0 = implied_v0_root ** 2
+    v0_min, v0_max = fixed_v0 * 0.95, fixed_v0 * 1.05
+    
+    print(f"LOCKING v0 to Market Reality: {fixed_v0:.4f} (Vol: {implied_v0_root:.1%})")
+
+    bounds = [
+            (1.0, 5.0),   # kappa (Speed of mean reversion)
+            (0.001, 0.5),  # theta (Long run variance)
+            (0.01, 0.9),   # xi (Vol of Vol - allow high values for steep smile)
+            (-0.99, 0.0), # rho (Correlation - Locked negative for Equity Skew)
+            (0.001, 0.1),  # v0 (Initial variance)
+            (0.0, 0.5),    # lamb (Jump intensity)
+            (-0.3, 0.0),   # mu_j (Mean jump size)
+            (0.05, 0.3)    # sigma_j (Jump volatility)
+        ]
+    x0 = [1.5, 0.04, 0.6, -0.4, 0.04, 0.5, -0.05, 0.2] #[1.5, 0.25, 0.6, -0.2, 0.21, 0.5, -0.05, 0.2]#[2.0, fixed_v0, 1.0, -0.7, fixed_v0, 0.1, -0.1, 0.1]
+    
+    def objective(p):
+        try:
+            model_p, market_p, weights = mc_calib.get_prices(p)
+            diff = (model_p - market_p)
+            w_rmse = np.sqrt(np.mean((diff * weights)**2))
+            return w_rmse
+        except Exception:
+            return 1e10
+
+    def callback(xk):
+        obj_val = objective(xk)
+        print(f" [MC-Iter] Obj: {obj_val:10.4f} | "
+              f"v0:{xk[4]:.4f} th:{xk[1]:.4f} ka:{xk[0]:.3f} xi:{xk[2]:.3f} rho:{xk[3]:.2f} | lam:{xk[5]:1.3f}  mu_j:{xk[6]:1.3f}  sig_j:{xk[7]:1.3f}")
+        
+    t0 = time.time()
+    res = minimize(objective, x0, method='SLSQP', bounds=bounds, callback=callback, tol=1e-8, options={'maxiter': 500, 'eps': 3e-3}) #was -2 5e-3 beste met 5k 5k
+    t1 = time.time() 
     print(f"Calibration time: ")
     print(t1 - t0)
-    print(f"CALIBRATION RESULTS (Time: {time.time()-t0:.2f}s)")
-    print(f"Obj (Weighted): {res_a.get('weighted_obj', 0):.4f} | RMSE (Price): {res_a.get('rmse', 0):.4f}")
+    print(f"CALIBRATION DONE (Time: {time.time()-t0:.2f}s)")
     
-    # Detailed Parameter Output
-    print("-" * 60)
-    print(f"Heston Component:")
-    print(f"  v0:      {res_a['v0']:.4f}")
-    print(f"  kappa:   {res_a['kappa']:.4f}")
-    print(f"  theta:   {res_a['theta']:.4f}")
-    print(f"  xi:      {res_a['xi']:.4f}")
-    print(f"  rho:     {res_a['rho']:.4f}")
-    print(f"Jump Component (Merton):")
-    print(f"  lambda:   {res_a['lamb']:.4f}  (Jumps per year)")
-    print(f"  mu_J:     {res_a['mu_j']:.4f}  (Mean log-jump size)")
-    print(f"  sigma_J:  {res_a['sigma_j']:.4f}  (Jump size volatility)")
-    print("-" * 60)
-
-    # 4. Saving
-    save_results(ticker, S0_actual, r_curve, q_curve, res_a, options_processed)
+    final_params = dict(zip(['kappa', 'theta', 'xi', 'rho', 'v0', 'lamb', 'mu_j', 'sigma_j'], res.x))
+    
+    save_results(ticker, S0_actual, r_curve, q_curve, final_params, options_processed)
 
 if __name__ == "__main__":
     main()
