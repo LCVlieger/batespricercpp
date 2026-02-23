@@ -10,163 +10,75 @@ from matplotlib.transforms import Bbox
 import matplotlib.patheffects as path_effects
 
 def visualize_price_surface_final(csv_file):
-    """
-    Final Polish: Triangular Surface with full Bates parameters,
-    strict font consistency, lowered tilt, and 'inspiration-style' layout.
-    """
     print(f"Generating Final Polished Plot from {csv_file}...")
     df = pd.read_csv(csv_file)
     
-    # 1. Load Metadata & Bates Parameters
     base_name = csv_file.replace("_prices.csv", "")
     json_file = f"{base_name}_meta.json"
     
-    # Default values
-    s0 = df['K'].median()
-    params = {}
-    ticker = "Asset"
+    s0, ticker, params = df['K'].median(), "Asset", {}
     
     try:
         if "calibration_" in base_name:
             ticker = base_name.split("calibration_")[1].split("_")[0]
-
         with open(json_file, 'r') as f:
             meta = json.load(f)
             s0 = meta['market']['S0']
             params = meta.get('analytical', {})
-            # Also check if params are in a deeper 'bates' key or similar, 
-            # but usually they are at the top of 'analytical'
-    except Exception:
-        pass
+    except Exception: pass
 
     df['Moneyness'] = df['K'] / s0
 
-    # 2. Setup Plot (White Background)
-    #plt.style.use('default')
-    fig = plt.figure(figsize=(14, 10))
-    ax = fig.add_subplot(111, projection='3d')
+    fig = plt.figure(figsize=(14, 10), facecolor='white')
+    ax = fig.add_subplot(111, projection='3d', facecolor='white')
     ax.computed_zorder = False
-    #ax.set_facecolor('white')
-    ax.scatter(
-        df['Moneyness'], df['T'], df['Market'], 
-        color='r', 
-        s=13, 
-        label='Market Price', 
-        depthshade=False, zorder=1
-    )
-    # --- Layer A: Triangular Surface ---
-    surf = ax.plot_trisurf(
-        df['Moneyness'], df['T'], df['Model'], 
-        cmap=cm.viridis, 
-        alpha=0.6, 
-        edgecolor='none', 
-        linewidth=0, 
-        antialiased=True, zorder=3
-    )
     
-    # --- Layer B: Market Dots ---
-    #ax.scatter(
-    #    df['Moneyness'], df['T'], df['Market'], 
-    #    color='r', #'#D72638'
-    #    s=15, 
-    #    alpha=0.9,
-    #    depthshade=False,
-    #    label='Market Price' # Label for legend
-    #)
+    ax.scatter(df['Moneyness'], df['T'], df['Market'], color='r', s=13, label='Market Price', depthshade=False, zorder=1)
     
+    surf = ax.plot_trisurf(df['Moneyness'], df['T'], df['Model'], cmap=cm.viridis, alpha=0.6, edgecolor='none', linewidth=0, antialiased=True, zorder=3)
 
-    # --- Layer C: Needles ---
     for x, y, z_mkt, z_mod in zip(df['Moneyness'], df['T'], df['Market'], df['Model']):
-        ax.plot([x, x], [y, y], [z_mkt, z_mod], color='black', alpha=0.3, linewidth=0.8,zorder=2)
+        ax.plot([x, x], [y, y], [z_mkt, z_mod], color='black', alpha=0.3, linewidth=0.8, zorder=2)
 
-    # 3. LEGEND (Exact Positioning from Inspiration)
-    # bbox_to_anchor=(0.157, 0.797)
-    ax.legend(
-        loc='upper left', 
-        bbox_to_anchor=(0.131, 0.81), 
-        frameon=False, 
-        labelcolor="black", 
-        fontsize=11,
-    )
+    ax.legend(loc='upper left', bbox_to_anchor=(0.131, 0.81), frameon=False, labelcolor="black", fontsize=11)
 
-    # 4. TITLES (With FULL Bates Parameters)
-    # Extract params
-    kappa = params.get('kappa', 0.0)
-    theta = params.get('theta', 0.0)
-    xi = params.get('xi', 0.0)
-    rho = params.get('rho', 0.0)
-    v0 = params.get('v0', 0.0)
-    lamb = params.get('lamb', 0.0)
-    mu_j = params.get('mu_j', 0.0)
-    sigma_j = params.get('sigma_j', 0.0)
+    k, th, xi, rho, v0 = params.get('kappa', 0.0), params.get('theta', 0.0), params.get('xi', 0.0), params.get('rho', 0.0), params.get('v0', 0.0)
+    la, mj, sj = params.get('lamb', 0.0), params.get('mu_j', 0.0), params.get('sigma_j', 0.0)
 
-    # Main Title (Coordinate: 0.535, 0.84)
-    text_obj = fig.text(0.5897125, 0.843, f"Bates Calibration Price Surface: ^SPX", 
-             fontsize=18, fontweight='bold', family='monospace', ha='center', color='black')
-    text_obj.set_path_effects([
-    path_effects.withStroke(linewidth=0.5, foreground='black')
-])
-    # Subtitle (Two lines to fit all parameters + S0)
-    # Coordinate: 0.535, 0.79
-    subtitle = (rf"$\kappa={kappa:.2f}, \theta={theta:.2f}, \xi={xi:.2f}, \rho={rho:.2f}, v_0={v0:.3f}$" + "\n" +
-                rf"$\lambda={lamb:.2f}, \mu_J={mu_j:.2f}, \sigma_J={sigma_j:.2f}, S_0={s0:.2f}$")
+    title = fig.text(0.5897, 0.843, f"Bates Calibration Price Surface: {ticker}", fontsize=18, fontweight='bold', family='monospace', ha='center', color='black')
+    title.set_path_effects([path_effects.withStroke(linewidth=0.5, foreground='black')])
     
-    fig.text(0.581575, 0.7989, subtitle, fontsize=10, family='monospace', ha='center', color='#555555')
+    subtitle = (rf"$\kappa={k:.2f}, \theta={th:.2f}, \xi={xi:.2f}, \rho={rho:.2f}, v_0={v0:.3f}$" + "\n" +
+                rf"$\lambda={la:.2f}, \mu_J={mj:.2f}, \sigma_J={sj:.2f}, S_0={s0:.2f}$")
+    fig.text(0.5815, 0.7989, subtitle, fontsize=10, family='monospace', ha='center', color='#555555')
 
-    # 5. STYLING & FONTS
-    # Transparent panes
-    #ax.xaxis.set_pane_color((1, 1, 1, 0))
-    #ax.yaxis.set_pane_color((1, 1, 1, 0))
-    #ax.zaxis.set_pane_color((1, 1, 1, 0))
     ax.dist = 14
-    # Gray dotted grid (from inspiration)
-    #ax.xaxis._axinfo["grid"]['color'] = (0.5, 0.5, 0.5, 0.2)
-    #ax.yaxis._axinfo["grid"]['color'] = (0.5, 0.5, 0.5, 0.2)
-    #ax.zaxis._axinfo["grid"]['color'] = (0.5, 0.5, 0.5, 0.2)
-    #ax.grid(True, color='gray', linestyle=':', linewidth=0.5, alpha=0.3)
-    # Labels
     ax.set_xlabel('Moneyness ($K/S_0$)', labelpad=10)
     ax.set_ylabel('Maturity ($T$ Years)', labelpad=10)
     ax.set_zlabel('Option Price ($)', labelpad=10)
 
-    # --- CRITICAL FIX: Unify Axis Tick Fonts ---
     for axis in [ax.xaxis, ax.yaxis, ax.zaxis]:
-        axis._axinfo["grid"].update({
-            'linewidth': 0.575,              # Much thinner than default
-            'alpha':1
-        })
-        for label in axis.get_ticklabels():
-            label.set_family('monospace')
+        axis._axinfo["grid"].update({'linewidth': 0.575, 'alpha': 1})
+        for label in axis.get_ticklabels(): label.set_family('monospace')
 
-    # TILT: Lowered to 22 (from 30)
-    #ax.view_init(elev=19.7, azim=-119)
     ax.view_init(elev=30, azim=-120)
-    #ax.view_init(elev=22, azim=-125)
-    # Tight layout logic
     fig.subplots_adjust(left=0.25, bottom=0.05, right=0.95, top=0.85)
 
-    # 6. Colorbar
     cbar = fig.colorbar(surf, ax=ax, shrink=0.5, aspect=15, pad=0.01)
     cbar.outline.set_visible(False)
     cbar.ax.tick_params(labelsize=9)
-    for l in cbar.ax.yaxis.get_ticklabels():
-        l.set_family('monospace')
+    for l in cbar.ax.yaxis.get_ticklabels(): l.set_family('monospace')
 
-    # 7. Save
     fig.canvas.draw()
     bbox = fig.get_tightbbox(fig.canvas.get_renderer())
-    bbox_shifted = Bbox([[bbox.x0 - 0.15, bbox.y0], [bbox.x1+0.075, bbox.y1+0.15]])
     save_path = csv_file.replace(".csv", "_price_surface_final.png")
-    plt.savefig(save_path, dpi=300, bbox_inches=bbox_shifted)
+    plt.savefig(save_path, dpi=300, bbox_inches=Bbox([[bbox.x0 - 0.15, bbox.y0], [bbox.x1 + 0.075, bbox.y1 + 0.15]]))
     print(f"-> Saved: {save_path}")
-    #plt.show()
 
-# --- Run ---
-files = glob.glob("results/calibration_*_prices.csv")
-if files:
-    # Pick the latest file
-    files_sorted = sorted(files, key=os.path.getctime, reverse=True)
-    latest_file = files_sorted[0]#max(files, key=os.path.getctime)
-    visualize_price_surface_final(latest_file)
-else:
-    print("No calibration files found.")
+if __name__ == "__main__":
+    files = glob.glob("results/calibration_*_prices.csv") or glob.glob("calibration_*_prices.csv")
+    if files:
+        files_sorted = sorted(files, key=os.path.getctime, reverse=True)
+        visualize_price_surface_final(files_sorted[0])
+    else:
+        print("No calibration files found.")

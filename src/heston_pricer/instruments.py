@@ -9,31 +9,21 @@ class OptionType(Enum):
 
 class Option(ABC):
     def __init__(self, K: float, T: float, option_type: OptionType):
-        self.K = K
-        self.T = T
-        self.option_type = option_type
+        self.K, self.T, self.option_type = K, T, option_type
 
     @abstractmethod
     def payoff(self, prices: np.ndarray) -> np.ndarray:
         pass
 
 class EuropeanOption(Option):
-    def __init__(self, strike, maturity, option_type, price=None):
-        self.strike = strike
-        self.maturity = maturity
-        self.option_type = option_type
-        self.price = price
     def payoff(self, prices: np.ndarray) -> np.ndarray:
-        S_T = prices[:, -1]
-        phi = self.option_type.value
+        S_T, phi = prices[:, -1], self.option_type.value
         return np.maximum(phi * (S_T - self.K), 0)
     
 class AsianOption(Option):
     def payoff(self, prices: np.ndarray) -> np.ndarray:
-        # Average across time steps (excluding t=0)
-        average_price = np.mean(prices[:, 1:], axis=1)
-        phi = self.option_type.value
-        return np.maximum(phi * (average_price - self.K), 0)
+        avg_S, phi = np.mean(prices[:, 1:], axis=1), self.option_type.value
+        return np.maximum(phi * (avg_S - self.K), 0)
     
 class BarrierType(Enum):
     DOWN_AND_OUT = 1
@@ -44,40 +34,30 @@ class BarrierType(Enum):
 class BarrierOption(Option):
     def __init__(self, K: float, T: float, barrier: float, barrier_type: BarrierType, option_type: OptionType):
         super().__init__(K, T, option_type)
-        self.barrier = barrier
-        self.barrier_type = barrier_type
+        self.barrier, self.barrier_type = barrier, barrier_type
 
     def payoff(self, prices: np.ndarray) -> np.ndarray:
-        S_T = prices[:, -1]
-        phi = self.option_type.value
-        intrinsic_payoff = np.maximum(phi * (S_T - self.K), 0)
+        S_T, phi = prices[:, -1], self.option_type.value
+        payoff = np.maximum(phi * (S_T - self.K), 0)
         
-        path_min = np.min(prices, axis=1)
-        path_max = np.max(prices, axis=1)
+        p_min, p_max = np.min(prices, axis=1), np.max(prices, axis=1)
         
-        # Barrier conditions below
         if self.barrier_type == BarrierType.DOWN_AND_OUT:
-            active_mask = path_min > self.barrier
-            return intrinsic_payoff * active_mask
-            
+            mask = p_min > self.barrier
         elif self.barrier_type == BarrierType.DOWN_AND_IN:
-            active_mask = path_min <= self.barrier
-            return intrinsic_payoff * active_mask
-            
+            mask = p_min <= self.barrier
         elif self.barrier_type == BarrierType.UP_AND_OUT:
-            active_mask = path_max < self.barrier
-            return intrinsic_payoff * active_mask
-            
+            mask = p_max < self.barrier
         elif self.barrier_type == BarrierType.UP_AND_IN:
-            active_mask = path_max >= self.barrier
-            return intrinsic_payoff * active_mask
+            mask = p_max >= self.barrier
+        else:
+            return payoff
             
-        return intrinsic_payoff
-    
+        return payoff * mask
     
 @dataclass
 class MarketOption:
     strike: float
     maturity: float
     market_price: float
-    option_type: str = OptionType.CALL
+    option_type: OptionType = OptionType.CALL

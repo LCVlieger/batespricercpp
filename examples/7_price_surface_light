@@ -4,341 +4,133 @@ import os
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
-import matplotlib as mpl
-from matplotlib import cm
 import matplotlib.colors as mcolors
+import matplotlib.tri as mtri
+from matplotlib import cm
 from matplotlib.colors import LightSource
 from matplotlib.ticker import FixedLocator
-import matplotlib.tri as mtri
-import matplotlib.path as mpath
-import matplotlib.transforms as mtransforms
-from mpl_toolkits.mplot3d import proj3d
 
-def create_premium_cmap_1():
-    """
-    'Matte Premium' Colormap.
-    Over-brightened to survive the aggressive darkening of 3D shading.
-    """
-    # 1. Over-brightened Hex Codes
-    colors = [
-        "#000F3B",  # Base Blue (Lifted so it doesn't turn pitch black in shadows)
-        "#1D408B",  # Vibrant Royal Blue (Replaces the Slate)
-        "#367BDCFF",  # Bright Cyan (Crucial for bringing back the miSd-level 'glow')
-        "#AFDFFF",  # Ice White
-        "#C8E9FF"   # Pure White (Forces the peaks to shine even under matte shading)
-    ]
-        
-        #colors = [
-       # "#000F3B",  # Base Blue (Lifted so it doesn't turn pitch black in shadows)
-       # "#1D3F88",  # Vibrant Royal Blue (Replaces the Slate)
-       # "#3F82DFFF",  # Bright Cyan (Crucial for bringing back the miSd-level 'glow')
-       # "#AFDFFF",  # Ice White
-       # "#C8E9FF"   # Pure White (Forces the peaks to shine even under matte shading)
-    #]
-    # 2. Push the brighter colors further down the slopes
+def create_premium_cmap():
+    colors = ["#000F3B", "#1D408B", "#367BDCFF", "#AFDFFF", "#C8E9FF"]
     nodes = [0.0, 0.1, 0.45, 0.8, 1.0]
-    
     base_cmap = mcolors.LinearSegmentedColormap.from_list("PremiumMatte", list(zip(nodes, colors)))
     
-    # 3. Apply the Gamma Warping (and actually return it this time!)
-    gamma = 1.1 # A gamma < 1 stretches the bright cyan downward to fight the shadows
-    N = 256
-    values = np.linspace(0, 1.0, N)
-    
-    warped_values = values ** gamma 
-    new_colors = base_cmap(warped_values)
-    
-    return mcolors.ListedColormap(new_colors, name="PremiumMatte_Warped")
-
-
-def create_premium_cmap_2():
-    """
-    'Neon Surface' Colormap.
-    """
-    colors = ["#091D57", "#2B66BF", "#2E88CD", "#9BDEF2", "#C2ECF7"]
-    nodes = [0.0, 0.1, 0.45, 0.8, 1.0]
-    return mcolors.LinearSegmentedColormap.from_list("NeonGold", list(zip(nodes, colors)))
+    values = np.linspace(0, 1.0, 256)
+    return mcolors.ListedColormap(base_cmap(values ** 1.1), name="PremiumMatte_Warped")
 
 def visualize_price_surface_final(csv_file):
     filename = os.path.basename(csv_file).replace(".csv", "")
-    print(f"Generating Refined Triangulation for: {filename}...")
+    print(f"Generating Refined Triangulation: {filename}...")
     
     df = pd.read_csv(csv_file)
-    
-    # 1. Load Metadata for S0
     base_name = csv_file.replace("_prices.csv", "")
-    json_file = f"{base_name}_meta.json"
+    
     s0 = df['K'].median()
     try:
-        with open(json_file, 'r') as f:
-            meta = json.load(f)
-            s0 = meta['market']['S0']
-    except Exception: pass
+        with open(f"{base_name}_meta.json", 'r') as f:
+            s0 = json.load(f)['market']['S0']
+    except: pass
 
-    # --- 2. DATA NORMALIZATION ---
     df['Moneyness'] = df['K'] / s0
     df['Market_Rel'] = df['Market'] / s0
     df['Model_Rel'] = df['Model'] / s0
 
-    LOWER_M, UPPER_M = df['Moneyness'].min(), df['Moneyness'].max()
-    LOWER_T, UPPER_T = df['T'].min(), df['T'].max()
+    low_m, upp_m = df['Moneyness'].min(), df['Moneyness'].max()
+    low_t, upp_t = df['T'].min(), df['T'].max()
 
-    # --- 3. EXACT TRIANGULATION ---
     tri = mtri.Triangulation(df['Moneyness'].values, df['T'].values)
     z = df['Model_Rel'].values
 
-    # =========================================================================
-    # THE "PERIMETER PROBE" + "SPINE SNIPING" LOGIC
-    # =========================================================================
-    finder = tri.get_trifinder() 
-    sensitivity = 0.02
-    span_x = df['Moneyness'].max() - df['Moneyness'].min()
-    span_y = df['T'].max() - df['T'].min()
-    r_x, r_y = span_x * sensitivity, span_y * sensitivity
-
-    highest_idx = df['Market_Rel'].idxmax()
-    spine_moneyness = df.loc[highest_idx, 'Moneyness']
-    spine_tolerance = 0.03
-
+    finder = tri.get_trifinder()
+    rx, ry = (upp_m - low_m) * 0.02, (upp_t - low_t) * 0.02
     xs, ys = df['Moneyness'].values, df['T'].values
     
     mask_c = finder(xs, ys) == -1
-    mask_r = finder(xs + r_x, ys) == -1
-    mask_l = finder(xs - r_x, ys) == -1
-    mask_u = finder(xs, ys + r_y) == -1
-    mask_d = finder(xs, ys - r_y) == -1
-    mask_spine = (
-        (df['Market_Rel'] > 0.06340) & (df['Market_Rel'] < 0.06343)
-    ) | (
-        (df['Market_Rel'] > 0.06304) & (df['Market_Rel'] < 0.063067)
-    )
+    mask_r, mask_l = finder(xs + rx, ys) == -1, finder(xs - rx, ys) == -1
+    mask_u, mask_d = finder(xs, ys + ry) == -1, finder(xs, ys - ry) == -1
+    mask_spine = ((df['Market_Rel'] > 0.06340) & (df['Market_Rel'] < 0.06343)) | \
+                 ((df['Market_Rel'] > 0.06304) & (df['Market_Rel'] < 0.063067))
     
-    # Tag all points that are exposed on the boundary or spine
     df['is_exposed'] = mask_c | mask_r | mask_l | mask_u | mask_d | mask_spine 
 
-    # --- 4. MICRO-MESH REFINEMENT (Fixed for Exact Flat Planes) ---
     refiner = mtri.UniformTriRefiner(tri)
-    linear_interp = mtri.LinearTriInterpolator(tri, z)
-    tri_refined, z_refined = refiner.refine_field(z, triinterpolator=linear_interp, subdiv=4)
+    tri_refined, z_refined = refiner.refine_field(z, triinterpolator=mtri.LinearTriInterpolator(tri, z), subdiv=4)
 
-    # --- 5. SETUP PLOT ---
     fig = plt.figure(figsize=(10, 7), facecolor='white') 
     ax = fig.add_subplot(111, projection='3d', facecolor='white')
     ax.computed_zorder = False
 
     vmin, vmax = 0.0, 0.10445
-    my_cmap = create_premium_cmap_1()
+    my_cmap = create_premium_cmap()
     norm = mcolors.Normalize(vmin=vmin, vmax=vmax)
     ls = LightSource(azdeg=90, altdeg=45) 
 
-    # --- 6. PLOT SMOOTH SURFACE ---
-    surf = ax.plot_trisurf(
-        tri_refined.x, tri_refined.y, z_refined, 
-        triangles=tri_refined.triangles,
-        cmap=my_cmap, norm=norm,
-        lightsource=ls, shade=True, 
-        edgecolor='none', alpha=0.85, 
-        antialiased=True, zorder=3, rasterized=True
-    )
+    ax.plot_trisurf(tri_refined.x, tri_refined.y, z_refined, triangles=tri_refined.triangles,
+                    cmap=my_cmap, norm=norm, lightsource=ls, shade=True, 
+                    edgecolor='none', alpha=0.85, antialiased=True, zorder=3, rasterized=True)
 
-    # --- 7. PLOT EXACT ORIGINAL WIREFRAME ON TOP ---
-    ax.plot_trisurf(
-        df['Moneyness'], df['T'], z, 
-        triangles=tri.triangles,
-        color=(1, 1, 1, 0), 
-        edgecolor="none",
-        linewidth=0.4,
-        shade=False, antialiased=True, zorder=3
-    )
-                               
+    ax.plot_trisurf(df['Moneyness'], df['T'], z, triangles=tri.triangles,
+                    color=(1, 1, 1, 0), edgecolor="none", linewidth=0.4, shade=False, zorder=3)
+
     m = cm.ScalarMappable(cmap=my_cmap, norm=norm)
     m.set_array([])
-    
-# =========================================================================
-    # --- PRE-CALCULATE SEMICIRCLE & CENTER FOR POINT STYLING ---
-    # =========================================================================
-    
-# =========================================================================
-    # --- PRE-CALCULATE SEMICIRCLE & CENTER FOR POINT STYLING ---
-    # =========================================================================
-# =========================================================================
-    # --- PRE-CALCULATE SEMICIRCLE & CENTER FOR POINT STYLING ---
-    # =========================================================================
-    import matplotlib.path as mpath
-    import matplotlib.transforms as mtransforms
-    from mpl_toolkits.mplot3d import proj3d
 
-    # 1. The Visible Right Half (Filled)
-    theta_right = np.linspace(-np.pi/2, np.pi/2, 30)
-    verts_right = np.column_stack([np.cos(theta_right), np.sin(theta_right)])
-    
-    # 2. The Invisible Left Half (Forces a perfectly stable, non-orbiting bounding box!)
-    theta_left = np.linspace(np.pi/2, 3*np.pi/2, 30)
-    verts_left = np.column_stack([np.cos(theta_left), np.sin(theta_left)])
-    
-    verts = np.vstack([[0, 0], verts_right, [0, 0], verts_left])
-    # LINETO draws the right half. MOVETO adds the left half to the bounds without drawing it.
-    codes = [mpath.Path.MOVETO] + [mpath.Path.LINETO] * 30 + [mpath.Path.CLOSEPOLY] + [mpath.Path.MOVETO] * 30
-    base_semicircle = mpath.Path(verts, codes)
-
-    center_m = (LOWER_M + UPPER_M) / 2.0
-    center_t = (LOWER_T + UPPER_T) / 2.0
-
-    # --- 8. POINT STYLING (Boundary Below Graph Logic) ---
-    # Notice we added 'enumerate' to get an exact index for our masks
-    # --- 8. POINT STYLING (Boundary Below Graph Logic) ---
-    # Notice we added 'enumerate' to strictly match our boundary masks!
-# =========================================================================
-    # --- 8. POINT STYLING (Boundary Below Graph Logic) ---
-    # =========================================================================
-    
-    # Calculate how many triangles every single point is attached to
-    node_triangle_counts = np.bincount(tri.triangles.flatten(), minlength=len(df))
+    span_x, span_y = upp_m - low_m, upp_t - low_t
 
     for i, (_, row) in enumerate(df.iterrows()):
-            
         m_mkt, t_mkt, rel_mkt, rel_mod = row['Moneyness'], row['T'], row['Market_Rel'], row['Model_Rel']
+        is_above, is_exposed = rel_mkt >= rel_mod, row['is_exposed']
         
-        is_above = rel_mkt >= rel_mod
-        is_exposed = row['is_exposed']
-        
-        # Z-ORDER LOGIC
         dot_zorder = 10 if is_above else 1
-        color_above, color_below ="#ECE7D3","#231D00"  #"#F3E5AB" ,"#231D00"  # "#FFE065", "#231D00" "#EAE1BC"
+        c_above, c_below = "#ECE7D3", "#231D00"
+        m_size = 5.2
 
-        # Draw the drop-lines
-        line_color = color_above if (is_above or is_exposed) else color_below
-        alpha = 0.65 if is_above else 0.95
-        current_color_needle = "white" if (is_above or is_exposed) else color_below
-        ax.plot([m_mkt, m_mkt], [t_mkt, t_mkt], [rel_mod, rel_mkt], 
-                color=current_color_needle, linestyle='-', linewidth=0.8, alpha=alpha, zorder=dot_zorder)
-        markersize = 5.2
+        ax.plot([m_mkt]*2, [t_mkt]*2, [rel_mod, rel_mkt], 
+                color="white" if (is_above or is_exposed) else c_below, linewidth=0.8, alpha=0.65 if is_above else 0.95, zorder=dot_zorder)
+
         if not is_above and not is_exposed:
-            # COMPLETELY HIDDEN
-            ax.plot([m_mkt], [t_mkt], [rel_mkt], marker='o', linestyle='None', color="#231D00", 
-                    markersize=markersize, markeredgecolor='none', alpha=1.0, zorder=dot_zorder)
-            ax.plot([m_mkt], [t_mkt], [rel_mkt], marker='o', linestyle='None', color="#231D00", 
-                    markersize=markersize, markeredgecolor='none', alpha=0.5, zorder=9)
-            
-            ax.plot([m_mkt], [t_mkt], [rel_mkt], marker='o', linestyle='None', 
-                    markerfacecolor=color_below, markeredgecolor='none', markersize=markersize, alpha=1.0, zorder=dot_zorder)
-
+            ax.plot([m_mkt], [t_mkt], [rel_mkt], marker='o', color=c_below, markersize=m_size, alpha=1.0, zorder=dot_zorder)
         elif is_above:
-            # FULLY VISIBLE
-            ax.plot([m_mkt], [t_mkt], [rel_mkt], marker='o', linestyle='None', 
-                    markerfacecolor=color_above, markeredgecolor='none', markersize=markersize, alpha=0.98, zorder=dot_zorder)
+            ax.plot([m_mkt], [t_mkt], [rel_mkt], marker='o', color=c_above, markersize=m_size, alpha=0.98, zorder=dot_zorder)
         elif is_exposed:
-            # THE "ECLIPSE SHIFT" METHOD 
+            ax.plot([m_mkt], [t_mkt], [rel_mkt], marker='o', color=c_above, markersize=m_size, alpha=1.0, zorder=dot_zorder)
             
-            # 1. Base Gold Dot (Always plotted)
-            ax.plot([m_mkt], [t_mkt], [rel_mkt], marker='o', linestyle='None', 
-                    markerfacecolor=color_above, markeredgecolor='none', 
-                    markersize=markersize, alpha=1.0, zorder=dot_zorder)
+            m_dir, t_dir = np.sign((low_m + upp_m)/2 - m_mkt), np.sign((low_t + upp_t)/2 - t_mkt)
+            if mask_l[i]: m_dir = 1.0
+            elif mask_r[i]: m_dir = -1.0
+            if mask_d[i]: t_dir = 1.0
+            elif mask_u[i]: t_dir = -1.0
             
-            # 2. Determine pure INWARD direction
-            m_dir, t_dir = 0.0, 0.0
-            if mask_l[i]: m_dir = 1.0     
-            elif mask_r[i]: m_dir = -1.0  
+            ms, ts = m_mkt + (m_dir * span_x * 0.009), t_mkt + (t_dir * span_y * 0.009)
+            tri_idx = finder(ms, ts)
             
-            if mask_d[i]: t_dir = 1.0     
-            elif mask_u[i]: t_dir = -1.0  
-            
-            if m_dir == 0 and t_dir == 0:
-                center_m = (LOWER_M + UPPER_M) / 2.0
-                center_t = (LOWER_T + UPPER_T) / 2.0
-                m_dir = np.sign(center_m - m_mkt)
-                t_dir = np.sign(center_t - t_mkt)
-                
-            m_shifted = m_mkt + (m_dir * span_x * 0.009)
-            t_shifted = t_mkt + (t_dir * span_y * 0.009)
-            
-            # =================================================================
-            # --- THE DISTANCE-TO-TRIANGLE FILTER ---
-            # =================================================================
-            tri_idx = finder(m_shifted, t_shifted)
-            
-            # If it strictly falls entirely outside the math hull
-            if tri_idx == -1:
-                continue
-                
-            # Grab the indices of the 3 corners of the triangle the shadow landed in
-            p0, p1, p2 = tri.triangles[tri_idx]
-            
-            # Calculate normalized distance from our shifted shadow to the 3 corners
-            d0 = np.hypot((xs[p0] - m_shifted) / span_x, (ys[p0] - t_shifted) / span_y)
-            d1 = np.hypot((xs[p1] - m_shifted) / span_x, (ys[p1] - t_shifted) / span_y)
-            d2 = np.hypot((xs[p2] - m_shifted) / span_x, (ys[p2] - t_shifted) / span_y)
-            
-            # If the closest corner of this triangle is really far away (> 6% of graph width),
-            # it means this is a massive, invisible ghost triangle in empty space!
-            distance_threshold = 0.02 # Tweak this up or down if it's too aggressive/lenient
-            is_spx = "SPX" in filename.upper()
-            # Create a boolean mask
-            condition = (max(d0, d1, d2) < distance_threshold) | \
-                        ((row['Moneyness'] > 1.022) & (row['Market_Rel'] < 1.024) & (row['T'] < 0.06) & is_spx)
+            if tri_idx != -1:
+                p0, p1, p2 = tri.triangles[tri_idx]
+                dists = [np.hypot((xs[p]-ms)/span_x, (ys[p]-ts)/span_y) for p in [p0, p1, p2]]
+                if not ((max(dists) < 0.02) or (row['Moneyness'] > 1.022 and row['Market_Rel'] < 1.024 and row['T'] < 0.06 and "SPX" in filename.upper())):
+                    ax.plot([ms], [ts], [rel_mkt], marker='o', color=c_below, markersize=m_size, alpha=0.5, zorder=9)
 
-            if condition.any(): 
-                continue
-            
-            if ((row['Moneyness'] > 1.022) & (row['Market_Rel'] < 1.024) & (row['T'] < 0.06) & (not is_spx)):
-                m_shifted = m_shifted + 0.005
-            # 3. Masking Dark Dot (Only plotted if it landed inside a REAL, dense triangle)
-            ax.plot([m_shifted], [t_shifted], [rel_mkt], marker='o', linestyle='None', 
-                    markerfacecolor="#231D00", markeredgecolor='none', 
-                    markersize=markersize, alpha=0.5, zorder=9)
-
-    ax.dist = 11  
-    ax.set_xlim(LOWER_M, UPPER_M)
-    ax.set_ylim(LOWER_T, UPPER_T) 
-    ax.set_zlim(0.0, vmax)
     ax.view_init(elev=28, azim=-115) 
-
-    ax.set_xlabel('Moneyness ($K/S_0$)', color="black", labelpad=2.5, fontsize=13)
-    ax.set_ylabel('Maturity ($T$ Years)', color="black", labelpad=9.75, fontsize=13)
-    ax.set_zlabel(r'Relative Price ($c/S_0$)', color="black", labelpad=11.75, fontsize=13)
+    ax.set_xlim(low_m, upp_m); ax.set_ylim(low_t, upp_t); ax.set_zlim(0.0, vmax)
+    ax.set_xlabel('Moneyness', fontsize=13); ax.set_ylabel('Maturity', fontsize=13); ax.set_zlabel('Relative Price', fontsize=13)
     
     for axis in [ax.xaxis, ax.yaxis, ax.zaxis]:
-        axis.set_pane_color((0.95, 0.95, 0.95, 1.0)) 
+        axis.set_pane_color((0.95, 0.95, 0.95, 1.0))
         axis._axinfo["grid"].update({'color': (0.68, 0.68, 0.68, 0.5), 'linewidth': 0.575})
 
-    scatter_above = ax.scatter([], [], color="#ECE7D3", label=r"Market / $S_0$", s=30)
-    scatter_below = ax.scatter([], [], color="#2B1600", label="Market < Model", s=30)
-    leg = ax.legend(handles=[scatter_above], loc='upper left', bbox_to_anchor=(0.07935, 0.7785), 
-              frameon=True, facecolor=(0.95, 0.95, 0.95), labelcolor="black", edgecolor='none', fontsize=13 , framealpha=1.0)
-    ax.tick_params(axis='z', which='major', pad=6)
-    ax.tick_params(axis='x', which='major', pad=-1)
-    for h in leg.legendHandles:
-        h.set_edgecolor("black")
-        h.set_linewidth(0.01)
-        h.set_alpha(1)
-        
-    # --- 10. VIBRANT COLORBAR ---
-    cb_values = np.linspace(vmax, vmin, 256)
-    cb_base_colors = my_cmap(norm(cb_values)) 
-    cb_hsv = mcolors.rgb_to_hsv(cb_base_colors[:, :3])
+    cb_v = np.linspace(vmax, vmin, 256)
+    cb_hsv = mcolors.rgb_to_hsv(my_cmap(norm(cb_v))[:, :3])
     cb_hsv[:, 1] = np.clip(cb_hsv[:, 1] * 1.2, 0, 1) 
-    cb_rgba_final = np.zeros((256, 1, 4))
-    cb_rgba_final[:, 0, :3] = mcolors.hsv_to_rgb(cb_hsv)
-    cb_rgba_final[:, 0, 3] = 1
-
+    
     cbar = fig.colorbar(m, ax=ax, shrink=0.5, aspect=15, pad=-0.02)
     cbar.ax.clear()
-    cbar.ax.imshow(cb_rgba_final, aspect='auto', extent=[0, 1, vmin, vmax], origin='upper', interpolation='bilinear')
-    cbar.ax.xaxis.set_visible(False)
-    cbar.ax.set_frame_on(False)
-    cbar.ax.set_title("Model / $S_0$", color="black", fontsize=13, pad=9)
-    cbar.outline.set_visible(False)
+    cbar.ax.imshow(np.atleast_3d(mcolors.hsv_to_rgb(cb_hsv)).transpose(0, 1, 2), aspect='auto', extent=[0, 1, vmin, vmax], origin='upper', interpolation='bilinear')
+    cbar.ax.set_title("Model / $S_0$", fontsize=13)
     cbar.locator = FixedLocator(np.arange(0.0, 0.12, 0.02))
     cbar.update_ticks()
 
-    fig.subplots_adjust(top=0.98, bottom=0.02, left=0.02, right=0.98)
-    ax.tick_params(axis='both', which='major', labelsize=12, colors='black')
-    cbar.ax.yaxis.set_tick_params(labelsize=12, color="black", labelcolor="black")
-    save_path = csv_file.replace(".csv", "_FINAL_TRIMESH.pdf")
-    plt.savefig(save_path, format='pdf', bbox_inches='tight', pad_inches=0.15, facecolor='white', dpi=800)
-    #plt.show()
+    plt.savefig(csv_file.replace(".csv", "_FINAL_TRIMESH.pdf"), format='pdf', bbox_inches='tight', facecolor='white', dpi=800)
 
 if __name__ == "__main__":
-    files = glob.glob("results/*_prices.csv") or glob.glob("*_prices.csv")
-    for f in files:
+    for f in (glob.glob("results/*_prices.csv") or glob.glob("*_prices.csv")):
         visualize_price_surface_final(f)

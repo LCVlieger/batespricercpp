@@ -1,494 +1,156 @@
 import numpy as np
 import pandas as pd
+from typing import List, Dict, Tuple
 from scipy.optimize import minimize
 from scipy.stats import norm
-from dataclasses import dataclass
-from .analytics import BatesAnalyticalPricer
-from typing import List, Dict
-from scipy.interpolate import interp1d
-from collections import defaultdict
-from .models.process import HestonProcess
-from .market import MarketEnvironment
-import warnings
-from .models.mc_kernels import generate_heston_paths_crn, generate_bates_paths_crn, generate_bates_paths, generate_bates_qe_slices_crn
-import numpy as np
-from scipy.optimize import minimize
-from scipy.stats import norm
-from .analytics import BatesAnalyticalPricer, BatesAnalyticalPricerFast
-
-class BatesCalibrator:
-    """
-    Calibrates Bates (Heston + Jumps) model parameters using L-BFGS-B optimization 
-    with VEGA-WEIGHTED RMSE to force the model to respect the Volatility Smile (Wings).
-    """
-    
-    def __init__(self, S0, r_curve, q_curve):
-        self.S0 = S0
-        self.r_curve = r_curve
-        self.q_curve = q_curve
-
-    def _calculate_robust_weights(self, options, sigma_cap=2.0):
-        """Calculates 1/spread weights capped at mean + n*sigma to handle outliers."""
-        spreads = np.array([max(abs(o.ask - o.bid), 0.01) for o in options])
-        raw_weights = 1.0 / spreads 
-        
-        mu = np.mean(raw_weights)
-        std = np.std(raw_weights)
-        cap_value = mu + sigma_cap * std
-        
-        return np.clip(raw_weights, a_min=None, a_max=cap_value)
-
-    def _calculate_bs_vega(self, S, K, T, r, q, sigma=0.25):
-        """
-        Standard Black-Scholes Vega (dC/dSigma).
-        Used to normalize price errors into 'Volatility Errors'.
-        """
-        if T <= 1e-6 or sigma <= 1e-6: return 0.0
-        d1 = (np.log(S / K) + (r - q + 0.5 * sigma**2) * T) / (sigma * np.sqrt(T))
-        return S * np.exp(-q * T) * norm.pdf(d1) * np.sqrt(T)
-
-    def calibrate(self, options, sigma_cap=2.0):
-        
-        strikes = np.array([o.strike for o in options])
-        maturities = np.array([o.maturity for o in options])
-        market_prices = np.array([o.market_price for o in options])
-        types = np.array([o.option_type for o in options])
-        r_vec = np.array([self.r_curve.get_rate(t) for t in maturities])
-        q_vec = np.array([self.q_curve.get_rate(t) for t in maturities])
-        
-        # 1. VEGA PRE-COMPUTATION (The "Equalizer")
-        # We calculate the Vega of every option to normalize the error.
-        # This makes a $1 error on a Put (low vega) count as much as a $10 error on a Call (high vega).
-        vegas = []
-        unique_Ts = np.unique(maturities)
-        
-        # Pre-calc ATM vega per tenor to set a floor
-        atm_vega_map = {T: self._calculate_bs_vega(self.S0, self.S0, T, self.r_curve.get_rate(T), self.q_curve.get_rate(T), 0.25) for T in unique_Ts}
-
-        for i in range(len(options)):
-            T = maturities[i]
-            opt_vega = self._calculate_bs_vega(self.S0, strikes[i], T, r_vec[i], q_vec[i], 0.25)
-            
-            # FLOOR: Prevent division by zero for deep OTM options.
-            # We floor the vega at 1% of the ATM vega to avoid exploding weights.
-            robust_vega = max(opt_vega, 0.05 * atm_vega_map[T])
-            vegas.append(robust_vega)
-        
-        vegas = np.array(vegas)
-        # Spread weights help ignore noisy data, Vega weights help fit the smile.
-        spread_weights = self._calculate_robust_weights(options, sigma_cap)
-
-        # 2. BOUNDS (Relaxed to allow the 'Smile' to form)
-        bounds = [
-            (0.1, 10.0),   # kappa (Speed of mean reversion)
-            (0.001, 0.5),  # theta (Long run variance)
-            (0.01, 5.0),   # xi (Vol of Vol - allow high values for steep smile)
-            (-0.99, 0.0), # rho (Correlation - Locked negative for Equity Skew)
-            (0.001, 0.5),  # v0 (Initial variance)
-            (0.0, 5.0),    # lamb (Jump intensity)
-            (-0.5, 0.5),   # mu_j (Mean jump size)
-            (0.01, 0.5)    # sigma_j (Jump volatility)
-        ]
-        
-        # Initial Guess: Standard Heston + Moderate Jumps
-        x0 = [1.5, 0.25, 0.6, -0.2, 0.21, 0.5, -0.05, 0.2]#[2.0, 0.04, 0.6, -0.7, 0.04, 0.1, -0.1, 0.1] #[3.2, 0.040, 0.82, -0.74, 0.022, 0.0376, -0.47, 0.37] #
-        def objective(p):
-            try:
-                kappa, theta, xi, rho, v0, lamb, mu_j, sigma_j = p
-
-                model_p = BatesAnalyticalPricer.price_vectorized(
-                    self.S0, strikes, maturities, r_vec, q_vec, types,
-                    kappa, theta, xi, rho, v0, lamb, mu_j, sigma_j
-                )
-                
-                if np.any(np.isnan(model_p)) or np.any(model_p < 0):
-                    return 1e10 
-                
-                # VEGA-WEIGHTED ERROR: (Price_Diff / Vega) ~ Vol_Diff
-                # This approximates minimizing the RMSE of Implied Volatility
-                raw_diff = (model_p - market_prices)
-                spreads2 = np.array([max(abs(o.ask - o.bid), 0.01) for o in options])
-                # We combine spread weights (trustworthiness) with Vega weights (importance)
-                lambda_floor = 0.05 * np.mean(list(atm_vega_map.values()))
-                weighted_diff = (raw_diff * spread_weights) #weighted_diff = raw_diff / (vegas + lambda_floor) #+ spreads2)#(raw_diff * spread_weights) ## raw_diff / (vegas + 1e-4)) * spread_weights
-                
-                return np.sqrt(np.mean(weighted_diff**2)) 
-            except: 
-                return 1e12
-            
-        def callback(xk):
-            w_obj = objective(xk)
-            print(f"   [Step] W-Obj: {w_obj:.4f} | "
-
-                  f"k:{xk[0]:.1f} th:{xk[1]:.3f} xi:{xk[2]:.2f} rho:{xk[3]:.2f} v0:{xk[4]:.2f}| "
-
-                  f"L:{xk[5]:.2f} muJ:{xk[6]:.2f} sJ:{xk[7]:.2f}")
-
-        # 3. OPTIMIZATION
-        res = minimize(
-            objective, 
-            x0, 
-            method='L-BFGS-B',
-            bounds=bounds, 
-            callback=callback, 
-            tol=1e-8, ######1e-8
-            options={'eps': 1e-4, 'maxiter': 500} # Larger eps for smoother gradients
-        )
-        
-        # Final recalc for reporting
-        final_p = BatesAnalyticalPricer.price_vectorized(self.S0, strikes, maturities, r_vec, q_vec, types, *res.x)
-        rmse_dollars = np.sqrt(np.mean((final_p - market_prices)**2))
-        
-        return {
-            **dict(zip(['kappa', 'theta', 'xi', 'rho', 'v0', 'lamb', 'mu_j', 'sigma_j'], res.x)), 
-            "weighted_obj": res.fun,
-            "rmse": rmse_dollars # Report dollar RMSE even though we optimized IV RMSE
-        }
-import numpy as np
 from numba import njit, prange
-from collections import defaultdict
-
+from .analytics import BatesAnalyticalPricer
+from .models.mc_kernels import generate_bates_paths_crn, generate_bates_qe_slices_crn
 
 @njit(parallel=True, fastmath=True)
 def _numba_price_engine(paths, time_idxs, strikes, is_calls, rates, qs, drift_corr, maturities):
-    """
-    Optimized pricing engine. prange parallelizes across options.
-    """
-    n_opts = len(strikes)
-    n_paths = paths.shape[0]
+    n_opts, n_paths = len(strikes), paths.shape[0]
     prices = np.zeros(n_opts)
     
     for i in prange(n_opts):
-        t_idx = time_idxs[i]
-        K = strikes[i]
-        T = maturities[i]
-        r = rates[i]
-        q = qs[i]
-        is_call = is_calls[i]
-        
-        # Apply the exact drift adjustment from your original logic
-        adj_factor = np.exp((r - q - drift_corr) * T)
+        t_idx, K, T, r, q, is_call = time_idxs[i], strikes[i], maturities[i], rates[i], qs[i], is_calls[i]
+        adj = np.exp((r - q - drift_corr) * T)
         disc = np.exp(-r * T)
         
         payoff_sum = 0.0
         for p in range(n_paths):
-            # paths[:, time_idx] access
-            S_final = paths[p, t_idx] * adj_factor
-            
-            if is_call:
-                val = S_final - K
-            else:
-                val = K - S_final
-            
+            s_final = paths[p, t_idx] * adj
+            val = s_final - K if is_call else K - s_final
             if val > 0:
                 payoff_sum += val
-        
         prices[i] = (payoff_sum / n_paths) * disc
-        
     return prices
+
+class BatesCalibrator:
+    def __init__(self, S0: float, r_curve, q_curve):
+        self.S0 = S0
+        self.r_curve = r_curve
+        self.q_curve = q_curve
+
+    def _get_weights(self, options, sigma_cap=2.0):
+        spreads = np.array([max(abs(o.ask - o.bid), 0.01) for o in options])
+        w = 1.0 / spreads 
+        return np.clip(w, None, np.mean(w) + sigma_cap * np.std(w))
+
+    def _bs_vega(self, S, K, T, r, q, sigma=0.25):
+        if T <= 1e-6 or sigma <= 1e-6: return 0.0
+        d1 = (np.log(S / K) + (r - q + 0.5 * sigma**2) * T) / (sigma * np.sqrt(T))
+        return S * np.exp(-q * T) * norm.pdf(d1) * np.sqrt(T)
+
+    def calibrate(self, options: List, sigma_cap=2.0) -> Dict:
+        strikes = np.array([o.strike for o in options])
+        mats = np.array([o.maturity for o in options])
+        mkt_p = np.array([o.market_price for o in options])
+        types = np.array([o.option_type for o in options])
+        rv, qv = np.array([self.r_curve.get_rate(t) for t in mats]), np.array([self.q_curve.get_rate(t) for t in mats])
+        
+        atm_vegas = {T: self._bs_vega(self.S0, self.S0, T, self.r_curve.get_rate(T), self.q_curve.get_rate(T)) for T in np.unique(mats)}
+        vegas = np.array([max(self._bs_vega(self.S0, s, t, r, q), 0.05 * atm_vegas[t]) for s, t, r, q in zip(strikes, mats, rv, qv)])
+        weights = self._get_weights(options, sigma_cap)
+
+        def obj(p):
+            try:
+                mod_p = BatesAnalyticalPricer.price_vectorized(self.S0, strikes, mats, rv, qv, types, *p)
+                if np.any(np.isnan(mod_p)) or np.any(mod_p < 0): return 1e10
+                return np.sqrt(np.mean(((mod_p - mkt_p) * weights)**2))
+            except: return 1e12
+
+        x0 = [1.5, 0.25, 0.6, -0.2, 0.21, 0.5, -0.05, 0.2]
+        bnds = [(0.1, 10.), (0.001, 0.5), (0.01, 5.0), (-0.99, 0.0), (0.001, 0.5), (0.0, 5.0), (-0.5, 0.5), (0.01, 0.5)]
+        
+        res = minimize(obj, x0, method='L-BFGS-B', bounds=bnds, tol=1e-8, options={'eps': 1e-4, 'maxiter': 500})
+        final_p = BatesAnalyticalPricer.price_vectorized(self.S0, strikes, mats, rv, qv, types, *res.x)
+        
+        return {**dict(zip(['kappa', 'theta', 'xi', 'rho', 'v0', 'lamb', 'mu_j', 'sigma_j'], res.x)), 
+                "weighted_obj": res.fun, "rmse": np.sqrt(np.mean((final_p - mkt_p)**2))}
 
 class BatesCalibratorMC:
     def __init__(self, S0, r_curve, q_curve, n_paths=20000, n_steps=250):
         self.S0, self.r_curve, self.q_curve = S0, r_curve, q_curve
-        self.n_paths, self.min_n_steps = n_paths, n_steps
+        self.n_paths, self.n_steps = n_paths + (n_paths % 2), n_steps
         self.z_noise = None
-        
-        # Internal state for flattened arrays
-        self.f_strikes = None
-        self.f_is_call = None
-        self.f_time_idxs = None
-        self.f_rates = None
-        self.f_qs = None
-        self.f_maturities = None
-        self.f_market_prices = None
-        self.f_weights = None
 
     def _precompute(self, options, sigma_cap=2.0):
-        # 1. Setup Time Grid
         self.T_max = max(o.maturity for o in options)
-        self.dt = self.T_max / self.min_n_steps
+        self.dt = self.T_max / self.n_steps
         
-        # Ensure even number of paths for Antithetic Variates
-        if self.n_paths % 2 != 0:
-            self.n_paths += 1
-            
-        # 2. Weights Logic (Unchanged)
         spreads = np.array([max(abs(o.ask - o.bid), 0.01) for o in options])
-        raw_weights = 1.0 / spreads
-        cap_val = np.mean(raw_weights) + sigma_cap * np.std(raw_weights)
-        all_weights = np.clip(raw_weights, None, cap_val)
+        w = 1.0 / spreads
+        self.f_weights = np.clip(w, None, np.mean(w) + sigma_cap * np.std(w)).astype(np.float64)
         
-        # 3. Flatten Arrays (Unchanged)
-        self.f_strikes = np.array([o.strike for o in options], dtype=np.float64)
-        self.f_is_call = np.array([o.option_type.upper() == 'CALL' for o in options], dtype=np.bool_)
-        self.f_maturities = np.array([o.maturity for o in options], dtype=np.float64)
-        self.f_market_prices = np.array([o.market_price for o in options], dtype=np.float64)
-        self.f_weights = all_weights.astype(np.float64)
+        self.f_strikes = np.array([o.strike for o in options])
+        self.f_is_call = np.array([o.option_type.upper() == 'CALL' for o in options])
+        self.f_maturities = np.array([o.maturity for o in options])
+        self.f_market_prices = np.array([o.market_price for o in options])
         self.f_rates = np.array([self.r_curve.get_rate(o.maturity) for o in options])
         self.f_qs = np.array([self.q_curve.get_rate(o.maturity) for o in options])
-        self.f_time_idxs = np.array([max(1, min(int(round(o.maturity / self.dt)), self.min_n_steps)) 
-                                    for o in options], dtype=np.int32)
+        self.f_t_idxs = np.array([max(1, min(int(round(o.maturity / self.dt)), self.n_steps)) for o in options], dtype=np.int32)
 
-        # 4. Antithetic Noise Generation (CORRECTED)
-        if (self.z_noise is None or self.z_noise.shape[1] != self.min_n_steps or self.z_noise.shape[2] != self.n_paths):
-            rng = np.random.default_rng(42)
-            half_paths = self.n_paths // 2
-            
-            # Create Full Noise Matrix
-            self.z_noise = np.zeros((4, self.min_n_steps, self.n_paths))
-            
-            # --- Generate First Half ---
-            z_half_1 = rng.standard_normal((3, self.min_n_steps, half_paths)) # Rows 0 (Asset), 1 (Vol), 3 (JumpSize)
-            u_half_1 = rng.random((self.min_n_steps, half_paths))             # Row 2 (Poisson Trigger)
-            
-            self.z_noise[0, :, :half_paths] = z_half_1[0]
-            self.z_noise[1, :, :half_paths] = z_half_1[1]
-            self.z_noise[3, :, :half_paths] = z_half_1[2]
-            self.z_noise[2, :, :half_paths] = u_half_1
+        if self.z_noise is None:
+            rng, hp = np.random.default_rng(42), self.n_paths // 2
+            zn = np.zeros((4, self.n_steps, self.n_paths))
+            z_gauss = rng.standard_normal((3, self.n_steps, hp))
+            zn[[0,1,3], :, :hp] = z_gauss
+            zn[2, :, :hp] = rng.random((self.n_steps, hp))
+            zn[[0,1,3], :, hp:] = -z_gauss
+            zn[2, :, hp:] = rng.random((self.n_steps, hp))
+            self.z_noise = zn
 
-            # --- Generate Second Half (Antithetic Mixed) ---
-            
-            # 1. Brownian Motions: Use Antithetic (Invert Signs) -> Reduces Variance
-            self.z_noise[0, :, half_paths:] = -z_half_1[0]
-            self.z_noise[1, :, half_paths:] = -z_half_1[1]
-            self.z_noise[3, :, half_paths:] = -z_half_1[2] # Jump Size is Normal, so we can invert this too
-            
-            # 2. Poisson Triggers: INDEPENDENT -> Preserves Jump Statistics
-            # DO NOT use (1-U) here. Generate fresh randoms.
-            self.z_noise[2, :, half_paths:] = rng.random((self.min_n_steps, half_paths))
     def get_prices(self, params):
-            kappa, theta, xi, rho, v0, lamb, mu_j, sigma_j = params
-            
-            # 1. Generate Paths (Risk Neutral, r=0, q=0)
-            # Result shape: [n_paths, n_steps + 1]
-            paths = generate_bates_paths_crn(
-                self.S0, 0.0, 0.0, v0, kappa, theta, xi, rho, 
-                lamb, mu_j, sigma_j,
-                self.T_max, self.n_paths, self.min_n_steps, self.z_noise
-            )
-            avg_terminal = np.mean(paths[:, -1])
+        paths = generate_bates_paths_crn(self.S0, 0.0, 0.0, params[4], params[0], params[1], params[2], params[3], 
+                                         params[5], params[6], params[7], self.T_max, self.n_paths, self.n_steps, self.z_noise)
+        paths *= (self.S0 / np.maximum(np.mean(paths, axis=0), 1e-12))
+        mod_p = _numba_price_engine(paths, self.f_t_idxs, self.f_strikes, self.f_is_call, self.f_rates, self.f_qs, 0.0, self.f_maturities)
+        return mod_p, self.f_market_prices, self.f_weights
 
-            ratio = avg_terminal / self.S0
-            if abs(ratio - 1.0) > 0.01: print(f"Error: {ratio}")
-            # =======================================================
-            # VECTORIZED MARTINGALE CORRECTION
-            # =======================================================
-            # Instead of checking just the last step, we check the average
-            # of the paths at EVERY time step (axis=0).
-            # This creates a vector of averages with shape (n_steps + 1,)
-            avg_paths = np.mean(paths, axis=0)
-            
-            # Calculate a correction factor for every single time step.
-            # This forces the mean at t=1, t=50, t=100... all to equal S0 exactly.
-            # We avoid division by zero by replacing 0s (unlikely) with 1s if needed, 
-            # though standard paths shouldn't hit 0 mean.
-            corrections = self.S0 / avg_paths
-            # Apply correction via Broadcasting.
-            # Numpy matches the last dimension: 
-            # (n_paths, n_steps+1) * (n_steps+1,) -> Scales each column correctly.
-            paths *= corrections
-            
-            # DEBUG: Verify the correction works (Optional)
-            # new_avgs = np.mean(paths, axis=0)
-            # if np.max(np.abs(new_avgs - self.S0)) > 1e-9:
-            #    print("Drift correction failed!")
-            # =======================================================
-            
-            #print(f" correction + {ratio:.5f}")
-            # 3. Pricing Engine
-            # Now pass the corrected paths. Since we forced the mean to S0,
-            # the drift_corr parameter in the engine stays 0.0.
-            model_prices = _numba_price_engine(
-                paths, self.f_time_idxs, self.f_strikes, self.f_is_call, 
-                self.f_rates, self.f_qs, 0.0, self.f_maturities
-            )
-            
-            return model_prices, self.f_market_prices, self.f_weights
+class BatesCalibratorMCFast(BatesCalibratorMC):
+    def __init__(self, S0, r_curve, q_curve, n_paths=5000, n_steps_per_year=365):
+        super().__init__(S0, r_curve, q_curve, n_paths, n_steps_per_year)
 
-        
-class BatesCalibratorMCFast:
-    def __init__(self, S0, r_curve, q_curve, n_paths=5000, n_steps_per_year=365): #20k, 50
-        self.S0 = S0
-        self.r_curve = r_curve
-        self.q_curve = q_curve
-        self.n_paths = n_paths
-        self.n_steps_per_year = n_steps_per_year
-        self.z_noise = None
-        
     def _precompute(self, options, sigma_cap=2.0):
-        # Ensure even number of paths for Antithetic Variates
-        if self.n_paths % 2 != 0:
-            self.n_paths += 1
-            
-        # 1. Setup Time Grid & Maturity Mapping
-        unique_maturities = np.unique([o.maturity for o in options])
-        unique_maturities.sort()
-        self.T_max = unique_maturities[-1]
-        
-        # Determine total steps based on max maturity
-        self.total_steps = max(1, int(round(self.T_max * self.n_steps_per_year)))
+        mats = np.sort(np.unique([o.maturity for o in options]))
+        self.T_max = mats[-1]
+        self.total_steps = max(1, int(round(self.T_max * self.n_steps)))
         self.dt = self.T_max / self.total_steps
+        self.mat_idxs = np.array([max(1, int(round(T / self.dt))) for T in mats], dtype=np.int32)
+        self.opt_map = np.array([np.where(mats == o.maturity)[0][0] for o in options], dtype=np.int32)
         
-        # Step indexes for each unique maturity
-        self.maturity_step_idxs = np.array([
-            max(1, int(round(T / self.dt))) for T in unique_maturities
-        ], dtype=np.int32)
-        
-        # Map each individual option to the column index of its maturity
-        self.opt_col_mapping = np.array([
-            np.where(unique_maturities == o.maturity)[0][0] for o in options
-        ], dtype=np.int32)
-        
-        # 2. Flatten Option Data
-        self.f_strikes = np.array([o.strike for o in options], dtype=np.float64)
-        self.f_is_call = np.array([o.option_type.upper() == 'CALL' for o in options], dtype=np.bool_)
-        self.f_maturities = np.array([o.maturity for o in options], dtype=np.float64)
-        self.f_market_prices = np.array([o.market_price for o in options], dtype=np.float64)
-        self.f_rates = np.array([self.r_curve.get_rate(o.maturity) for o in options], dtype=np.float64)
-        self.f_qs = np.array([self.q_curve.get_rate(o.maturity) for o in options], dtype=np.float64)
-        
-        # 3. Weights Logic
-        spreads = np.array([max(abs(o.ask - o.bid), 0.01) for o in options])
-        raw_weights = 1.0 / spreads
-        cap_val = np.mean(raw_weights) + sigma_cap * np.std(raw_weights)
-        self.f_weights = np.clip(raw_weights, None, cap_val).astype(np.float64)
-        
-        # 4. Antithetic Noise Generation (5 Rows now)
-        if (self.z_noise is None or self.z_noise.shape[1] != self.total_steps or self.z_noise.shape[2] != self.n_paths):
-            rng = np.random.default_rng(42)
-            half_paths = self.n_paths // 2
-            
-            self.z_noise = np.zeros((5, self.total_steps, self.n_paths), dtype=np.float64)
-            
-            # --- First Half ---
-            normals_half = rng.standard_normal((3, self.total_steps, half_paths))
-            uniforms_half = rng.random((2, self.total_steps, half_paths))
-            
-            self.z_noise[0, :, :half_paths] = normals_half[0]  # Z_v
-            self.z_noise[1, :, :half_paths] = normals_half[1]  # Z_x
-            self.z_noise[2, :, :half_paths] = normals_half[2]  # Z_jump
-            self.z_noise[3, :, :half_paths] = uniforms_half[0] # U_v
-            self.z_noise[4, :, :half_paths] = uniforms_half[1] # U_jump
+        super()._precompute(options, sigma_cap)
+        if self.z_noise.shape[0] != 5:
+            rng, hp = np.random.default_rng(42), self.n_paths // 2
+            zn = np.zeros((5, self.total_steps, self.n_paths))
+            z_g, u_g = rng.standard_normal((3, self.total_steps, hp)), rng.random((2, self.total_steps, hp))
+            zn[:3, :, :hp], zn[3:, :, :hp] = z_g, u_g
+            zn[:3, :, hp:], zn[3:, :, hp:] = -z_g, rng.random((2, self.total_steps, hp))
+            self.z_noise = zn
 
-            # --- Second Half (Antithetic) ---
-            self.z_noise[0, :, half_paths:] = -normals_half[0] 
-            self.z_noise[1, :, half_paths:] = -normals_half[1]
-            self.z_noise[2, :, half_paths:] = -normals_half[2]
-            
-            # Fresh Uniforms (Independent for Variance/Jumps)
-            self.z_noise[3, :, half_paths:] = rng.random((self.total_steps, half_paths))
-            self.z_noise[4, :, half_paths:] = rng.random((self.total_steps, half_paths))
+    def get_prices(self, params):
+        ka, th, xi, rho, v0, la, mj, sj = params
+        slices = generate_bates_qe_slices_crn(self.S0, v0, ka, th, xi, rho, la, mj, sj, self.dt, self.n_paths, self.total_steps, self.mat_idxs, self.z_noise)
+        slices *= (self.S0 / np.maximum(np.mean(slices, axis=0), 1e-12))
+        
+        st, dr = slices[:, self.opt_map], np.exp((self.f_rates - self.f_qs) * self.f_maturities)
+        payoffs = np.where(self.f_is_call, np.maximum(st * dr - self.f_strikes, 0.), np.maximum(self.f_strikes - st * dr, 0.))
+        return np.mean(payoffs * np.exp(-self.f_rates * self.f_maturities), axis=0), self.f_market_prices, self.f_weights
 
     def calibrate(self, options, sigma_cap=2.0):
-        print(f"Precomputing Monte Carlo slices and noise matrix for {len(options)} options...")
-        self._precompute(options, sigma_cap=sigma_cap)
-        
-        # Bounds: kappa, theta, xi, rho, v0, lamb, mu_j, sigma_j
-        bounds = [
-            (0.1, 10.0),    # kappa (mean reversion speed)
-            (0.001, 0.5),   # theta (long term variance)
-            (0.01, 5.0),    # xi (vol of vol)
-            (-0.99, 0.0),   # rho (correlation, usually negative for equities)
-            (0.001, 0.5),   # v0 (initial variance)
-            (0.0, 5.0),     # lamb (jumps per year)
-            (-0.5, 0.5),    # mu_j (mean jump size)
-            (0.01, 0.5)     # sigma_j (jump volatility)
-        ]
-        
-        # Standard initial guess
-        x0 = [1.5, 0.04, 0.6, -0.4, 0.04, 0.5, -0.05, 0.2]
-
-        bounds = [
-            (1.0, 5.0),   # kappa (Speed of mean reversion)
-            (0.001, 0.5),  # theta (Long run variance)
-            (0.01, 0.9),   # xi (Vol of Vol - allow high values for steep smile)
-            (-0.99, 0.0), # rho (Correlation - Locked negative for Equity Skew)
-            (0.001, 0.1),  # v0 (Initial variance)
-            (0.0, 0.5),    # lamb (Jump intensity)
-            (-0.3, 0.0),   # mu_j (Mean jump size)
-            (0.05, 0.3)    # sigma_j (Jump volatility)
-        ]
+        self._precompute(options, sigma_cap)
+        bnds = [(1.0, 5.0), (0.001, 0.5), (0.01, 0.9), (-0.99, 0.0), (0.001, 0.1), (0.0, 0.5), (-0.3, 0.0), (0.05, 0.3)]
         x0 = [1.5, 0.25, 0.6, -0.2, 0.21, 0.5, -0.05, 0.2]
         
-        def objective(p):
+        def obj(p):
             try:
-                model_prices, market_prices, weights = self.get_prices(p)
-                
-                # Penalize NaN or negative prices heavily
-                if np.any(np.isnan(model_prices)) or np.any(model_prices < 0):
-                    return 1e10 
-                
-                raw_diff = (model_prices - market_prices)
-                weighted_diff = raw_diff * weights 
-                
-                return np.sqrt(np.mean(weighted_diff**2))
-            except Exception as e:
-                # Catch any math errors in the kernel
-                return 1e12
-            
-        def callback(xk):
-            w_obj = objective(xk)
-            print(f"   [MC Step] W-Obj: {w_obj:.4f} | "
-                  f"k:{xk[0]:.2f} th:{xk[1]:.4f} xi:{xk[2]:.2f} rho:{xk[3]:.2f} v0:{xk[4]:.4f} | "
-                  f"L:{xk[5]:.2f} muJ:{xk[6]:.2f} sJ:{xk[7]:.2f}")
+                mp, mkp, w = self.get_prices(p)
+                if np.any(np.isnan(mp)) or np.any(mp < 0): return 1e10
+                return np.sqrt(np.mean(((mp - mkp) * w)**2))
+            except: return 1e12
 
-        print("Starting L-BFGS-B Optimization (Monte Carlo Engine)...")
-        res = minimize(
-            objective, 
-            x0, 
-            method='L-BFGS-B',
-            bounds=bounds, 
-            callback=callback, 
-            # Slightly larger 'eps' (1e-3) helps the finite-difference gradient 
-            # step over tiny Monte Carlo noise bumps!
-            tol = 1e-8,
-            options={'eps': 1e-3, 'maxiter': 250} 
-        )
-        
-        # Calculate final unweighted RMSE in dollars
-        final_model_prices, market_prices, _ = self.get_prices(res.x)
-        rmse_dollars = float(np.sqrt(np.mean((final_model_prices - market_prices)**2)))
-        
-        param_keys = ['kappa', 'theta', 'xi', 'rho', 'v0', 'lamb', 'mu_j', 'sigma_j']
-        
-        return {
-            **dict(zip(param_keys, res.x)), 
-            "weighted_obj": res.fun,
-            "rmse": rmse_dollars 
-        }
-    def get_prices(self, params):
-        kappa, theta, xi, rho, v0, lamb, mu_j, sigma_j = params
-        
-        # 1. Generate Slices
-        slices = generate_bates_qe_slices_crn(
-            self.S0, v0, kappa, theta, xi, rho, lamb, mu_j, sigma_j,
-            self.dt, self.n_paths, self.total_steps, 
-            self.maturity_step_idxs, self.z_noise
-        )
-        
-        # 2. VECTORIZED MARTINGALE CORRECTION ON SLICES
-        avg_slices = np.mean(slices, axis=0)
-        
-        # Safe-guard: prevent division by zero if optimizer tests extreme bounds
-        avg_slices = np.maximum(avg_slices, 1e-12)
-        
-        corrections = self.S0 / avg_slices
-        slices *= corrections
-        
-        # 3. RATE / DIVIDEND APPLICATION & VECTORIZED PRICING
-        S_T = slices[:, self.opt_col_mapping]
-        
-        drifts = np.exp((self.f_rates - self.f_qs) * self.f_maturities)
-        F_T = S_T * drifts 
-        
-        K = self.f_strikes
-        payoffs = np.where(self.f_is_call,
-                           np.maximum(F_T - K, 0.0),
-                           np.maximum(K - F_T, 0.0))
-        
-        discounts = np.exp(-self.f_rates * self.f_maturities)
-        discounted_payoffs = payoffs * discounts
-        
-        model_prices = np.mean(discounted_payoffs, axis=0)
-        
-        return model_prices, self.f_market_prices, self.f_weights
+        res = minimize(obj, x0, method='L-BFGS-B', bounds=bnds, tol=1e-8, options={'eps': 1e-3, 'maxiter': 250})
+        final_p, _, _ = self.get_prices(res.x)
+        return {**dict(zip(['kappa', 'theta', 'xi', 'rho', 'v0', 'lamb', 'mu_j', 'sigma_j'], res.x)), 
+                "weighted_obj": res.fun, "rmse": float(np.sqrt(np.mean((final_p - self.f_market_prices)**2)))}

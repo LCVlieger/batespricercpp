@@ -19,67 +19,55 @@ class MonteCarloPricer:
         paths = self.process.generate_paths(option.T, n_paths, n_steps, **kwargs)
         payoffs = option.payoff(paths)
     
-        discount_factor = np.exp(-self.process.market.r * option.T)
-        discounted_payoffs = payoffs * discount_factor
+        discount = np.exp(-self.process.market.r * option.T)
+        disc_payoffs = payoffs * discount
     
-        mean_price = np.mean(discounted_payoffs)
-        std_error = np.std(discounted_payoffs, ddof=1) / np.sqrt(n_paths)
+        mu = np.mean(disc_payoffs)
+        se = np.std(disc_payoffs, ddof=1) / np.sqrt(n_paths)
         
         return PricingResult(
-            price=mean_price,
-            std_error=std_error,
-            conf_interval_95=(mean_price - 1.96 * std_error, mean_price + 1.96 * std_error)
+            price=mu,
+            std_error=se,
+            conf_interval_95=(mu - 1.96 * se, mu + 1.96 * se)
         )
 
     def compute_greeks(self, option: Option, n_paths: int = 10000, n_steps: int = 252, bump_ratio: float = 0.01, seed: int = 42) -> Dict[str, float]:
-        """
-        Computes Greeks using finite differences with Common Random Numbers (CRN).
-        Adapted to handle variable noise channels (Heston=2, Bates=4).
-        """
-        original_market = self.process.market
-        original_S0 = original_market.S0
-        epsilon_s = original_S0 * bump_ratio
-        epsilon_v = 0.001 
+        mkt = self.process.market
+        S0, v0 = mkt.S0, mkt.v0
+        eps_s, eps_v = S0 * bump_ratio, 0.001 
         
-        # Determine dimensions needed
-        n_channels = getattr(self.process, 'noise_channels', 2)
-        
+        n_chan = getattr(self.process, 'noise_channels', 2)
         rng = np.random.default_rng(seed)
         
-        # Initialize Noise Tensor
-        # If Bates (4 channels): 
-        #   Ch 0,1,3: Gaussian (Asset, Vol, JumpSize)
-        #   Ch 2: Uniform (JumpTrigger)
-        if n_channels == 4:
+        if n_chan == 4:
             Z_CRN = np.zeros((4, n_steps, n_paths))
             Z_CRN[0] = rng.standard_normal((n_steps, n_paths)) # Asset
             Z_CRN[1] = rng.standard_normal((n_steps, n_paths)) # Vol
-            Z_CRN[2] = rng.random((n_steps, n_paths))          # Jump Prob (Uniform)
+            Z_CRN[2] = rng.random((n_steps, n_paths))          # Jump Trigger
             Z_CRN[3] = rng.standard_normal((n_steps, n_paths)) # Jump Size
         else:
-            # Default Heston/BS (All Gaussian)
-            Z_CRN = rng.standard_normal((n_channels, n_steps, n_paths))
+            Z_CRN = rng.standard_normal((n_chan, n_steps, n_paths))
         
-        # 1. Base Price
+        # Base Case
         res_curr = self.price(option, n_paths, n_steps, noise=Z_CRN)
         
-        # 2. Delta & Gamma (Bump S0)
-        self.process.market = replace(original_market, S0 = original_S0 + epsilon_s)
+        # Delta & Gamma bumps
+        self.process.market = replace(mkt, S0 = S0 + eps_s)
         res_up = self.price(option, n_paths, n_steps, noise=Z_CRN)
         
-        self.process.market = replace(original_market, S0 = original_S0 - epsilon_s)
+        self.process.market = replace(mkt, S0 = S0 - eps_s)
         res_down = self.price(option, n_paths, n_steps, noise=Z_CRN)
         
-        # 3. Vega (Bump v0)
-        self.process.market = replace(original_market, v0 = original_market.v0 + epsilon_v, S0=original_S0)
+        # Vega bump
+        self.process.market = replace(mkt, v0 = v0 + eps_v, S0 = S0)
         res_vega = self.price(option, n_paths, n_steps, noise=Z_CRN)
         
-        # Restore market
-        self.process.market = original_market
-
-        delta = (res_up.price - res_down.price) / (2 * epsilon_s)
-        gamma = (res_up.price - 2 * res_curr.price + res_down.price) / (epsilon_s ** 2)
-        vega = (res_vega.price - res_curr.price) / epsilon_v
+        # Restore and Calculate
+        self.process.market = mkt
+        
+        delta = (res_up.price - res_down.price) / (2 * eps_s)
+        gamma = (res_up.price - 2 * res_curr.price + res_down.price) / (eps_s ** 2)
+        vega = (res_vega.price - res_curr.price) / eps_v
         
         return {
             "price": res_curr.price,
