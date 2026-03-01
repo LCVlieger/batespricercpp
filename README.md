@@ -17,7 +17,7 @@ src/batespricer/
 │                         BatesCalibratorMC, BatesCalibratorMCFast
 ├── data.py             # FRED yield curves (NSS-OLS), implied dividends, yfinance
 ├── instruments.py      # European, Asian, Barrier (Down-and-Out, In)
-├── market.py           # MarketEnvironment dataclass
+├── market.py           # MarketEnvironment class
 └── models/
     ├── mc_kernels.py   # Numba path generators
     ├── mc_pricer.py    # Monte Carlo pricer, Greeks
