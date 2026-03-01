@@ -14,3 +14,4 @@ src/spx_eod_202203.txt
 
 .report_runfiles/
 
+.pytest_cache/
