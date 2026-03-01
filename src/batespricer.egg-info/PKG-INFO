@@ -1,9 +1,10 @@
 Metadata-Version: 2.4
-Name: heston_model
+Name: batespricer
 Version: 1.1.0
-Summary: "High-Performance Heston Calibration & Pricing Engine
+Summary: Calibration and Pricing under the Bates Stochastic Volatility Model
 Requires-Dist: numpy
 Requires-Dist: scipy
 Requires-Dist: numba
 Requires-Dist: matplotlib
 Requires-Dist: pytest
+Requires-Dist: yfinance
