@@ -250,7 +250,7 @@ class BatesCalibratorMC:
 
 class BatesCalibratorMCFast(BatesCalibratorMC):
     """QE-based MC calibration with slice pricing (Andersen 2008)."""
-    def __init__(self, S0: float, r_curve, q_curve, n_paths: int = 5000, n_steps_per_year: int = 365):
+    def __init__(self, S0: float, r_curve, q_curve, n_paths: int = 10000, n_steps_per_year: int =2000):
         super().__init__(S0, r_curve, q_curve, n_paths, n_steps_per_year)
 
     def _precompute(self, options, sigma_cap=2.0):

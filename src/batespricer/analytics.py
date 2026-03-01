@@ -21,7 +21,7 @@ def implied_volatility(price: float, S: float, K: float, T: float, r: float, q: 
     except: return 0.0
 
 class BatesAnalyticalPricer:
-    """Attari (2004) formulation with midpoint quadrature."""
+    """Albrecher (2007) formulation with midpoint quadrature."""
     @staticmethod
     def price_vectorized(S0, K, T, r, q, types, kappa, theta, xi, rho, v0, lamb, mu_j, sigma_j, silent=False) -> np.ndarray:
         N_grid, u_limit = 296, 10000
@@ -69,11 +69,10 @@ class BatesAnalyticalPricer:
         return np.nan_to_num(np.maximum(res, 0.0))
 
 class BatesAnalyticalPricerFast:
-    """Attari (2004) with cached Gauss-Legendre nodes per maturity."""
     @staticmethod
-    def price_vectorized(S0, K, T, r, q, types, kappa, theta, xi, rho, v0, lamb, mu_j, sigma_j, silent=True) -> np.ndarray:
+    def price_vectorized(S0, K, T, r, q, types, kappa, theta, xi, rho, v0, lamb, mu_j, sigma_j, silent=True):
         K, T, r, q, types = map(np.atleast_1d, [K, T, r, q, types])
-        N_nodes, u_max = 1000, 10000 #1000, 20000 #250, 500 #126, 300.0
+        N_nodes, u_max = 300, 20000 #250, 500 #126, 300.0
         nodes, weights = leg.leggauss(N_nodes)
         u, du = 0.5 * u_max * (nodes + 1), 0.5 * u_max * weights
         u = np.maximum(u, 1e-12)

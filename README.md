@@ -6,7 +6,7 @@ The Bates model extends Heston by adding Merton log-normal jumps to the asset pr
 
 ## Pricing and calibration
 
-Two pricing approaches are implemented. A semi-analytical direct integration method uses the Attari (2004) formulation with Gauss-Legendre quadrature and maturity-based caching. A Monte Carlo simulation uses full truncation (Lord et al., 2010) and quadratic exponential (Andersen, 2008) discretization schemes. Calibration is formulated as spread-weighted nonlinear least squares, solved with L-BFGS-B and SLSQP. The accelerated semi-analytical calibration converges in under 10 seconds. Calibrated to 300 OTM options per asset, the semi-analytical approach achieves a price RMSE of 4.84 bps for the S&P 500 and 6.28 bps for Apple.
+Two pricing approaches are implemented. A semi-analytical direct integration method uses the Albrecher (2007) formulation with Gauss-Legendre quadrature and maturity-based caching. A Monte Carlo simulation uses full truncation (Lord et al., 2010) and quadratic exponential (Andersen, 2008) discretization schemes. Calibration is formulated as spread-weighted nonlinear least squares, solved with L-BFGS-B and SLSQP. The accelerated semi-analytical calibration converges in under 10 seconds. Calibrated to 300 OTM options per asset, the semi-analytical approach achieves a price RMSE of 4.84 bps for the S&P 500 and 6.28 bps for Apple.
 
 The calibrated parameters are applied to exotic options. Results under the Bates model for the S&P 500 and Apple (T = 1, K = 1.05 · S₀, B = 0.8 · S₀):
 
@@ -74,7 +74,7 @@ Validates European call convergence to Black-Scholes, Asian call convergence to 
 - Svensson, L.E.O. (1994). Estimating and interpreting forward interest rates: Sweden 1992–1994. *NBER Working Paper* 4871.
 - Bates, D.S. (1996). Jumps and stochastic volatility: exchange rate processes implicit in Deutsche Mark options. *Review of Financial Studies*, 9(1), 69–107.
 - Carr, P. and Madan, D.B. (1999). Option valuation using the fast Fourier transform. *J. Computational Finance*, 2(4), 61–73.
-- Attari, M. (2004). Option pricing using Fourier transforms: a numerically efficient simplification. *SSRN Working Paper*.
+
 - Albrecher, H. et al. (2007). The little Heston trap. *Wilmott Magazine*, Jan, 83–92.
 - Andersen, L. (2008). Efficient simulation of the Heston stochastic volatility model. *J. Computational Finance*, 11(3), 1–22.
 - Lord, R. et al. (2010). A comparison of biased simulation schemes for stochastic volatility models. *Quantitative Finance*, 10(2), 177–194.
