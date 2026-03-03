@@ -1,6 +1,0 @@
-numpy
-scipy
-numba
-matplotlib
-pytest
-yfinance
