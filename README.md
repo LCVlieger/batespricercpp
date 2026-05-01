@@ -1,10 +1,10 @@
 # batespricer — C++
 
-C++ port of [batespricer](https://github.com/LCVlieger/batespricer). Calibrates the Bates stochastic volatility jump-diffusion model to live options data and prices vanillas using both semi-analytical and Monte Carlo methods. The original Python repo has the full feature set (exotics, Greeks, notebooks); this one exists to do the heavy lifting in C++.
+C++ port of [batespricer](https://github.com/LCVlieger/batespricer). Calibrates the Bates stochastic volatility jump-diffusion model to live options data and prices vanillas using both semi-analytical and Monte Carlo methods. The original Python repo has the full feature set (exotics, Greeks, notebooks); this repository increases computation speed utilizing C++.
 
 ## Overview
 
-Market data is pulled by a small Python script (`yfinance` + FRED yield curves) and written to JSON. Everything else — Fourier inversion, quadrature, path simulation, optimisation — runs in C++17.
+Market data is pulled by a small Python script (`yfinance` + FRED yield curves) and written to JSON. Everything else, that is, Fourier inversion, quadrature, path simulation, optimisation, runs in C++17.
 
 ```
 Python (fetch)  →  market_data.json  →  C++ (calibrate + price)
