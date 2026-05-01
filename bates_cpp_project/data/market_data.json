@@ -1,0 +1,43 @@
+{
+  "ticker": "^SPX",
+  "S0": 5500.0,
+  "fetch_date": "2026-05-01",
+  "rate_curve": {
+    "0.083Y": 0.049,
+    "0.25Y": 0.048,
+    "0.5Y": 0.047,
+    "1.0Y": 0.045
+  },
+  "dividend_curve": {
+    "0.083Y": 0.013,
+    "0.25Y": 0.013,
+    "0.5Y": 0.014,
+    "1.0Y": 0.015
+  },
+  "options": [
+    {"strike": 5000.0, "maturity": 0.25, "market_price": 42.50, "option_type": "PUT",  "bid": 41.0, "ask": 44.0, "r": 0.048, "q": 0.013},
+    {"strike": 5100.0, "maturity": 0.25, "market_price": 55.30, "option_type": "PUT",  "bid": 54.0, "ask": 56.6, "r": 0.048, "q": 0.013},
+    {"strike": 5200.0, "maturity": 0.25, "market_price": 72.80, "option_type": "PUT",  "bid": 71.0, "ask": 74.6, "r": 0.048, "q": 0.013},
+    {"strike": 5300.0, "maturity": 0.25, "market_price": 96.40, "option_type": "PUT",  "bid": 95.0, "ask": 97.8, "r": 0.048, "q": 0.013},
+    {"strike": 5600.0, "maturity": 0.25, "market_price": 148.20, "option_type": "CALL", "bid": 147.0, "ask": 149.4, "r": 0.048, "q": 0.013},
+    {"strike": 5700.0, "maturity": 0.25, "market_price": 105.60, "option_type": "CALL", "bid": 104.0, "ask": 107.2, "r": 0.048, "q": 0.013},
+    {"strike": 5800.0, "maturity": 0.25, "market_price": 72.30, "option_type": "CALL", "bid": 71.0, "ask": 73.6, "r": 0.048, "q": 0.013},
+    {"strike": 5900.0, "maturity": 0.25, "market_price": 47.10, "option_type": "CALL", "bid": 46.0, "ask": 48.2, "r": 0.048, "q": 0.013},
+    {"strike": 5000.0, "maturity": 0.50, "market_price": 88.70, "option_type": "PUT",  "bid": 87.0, "ask": 90.4, "r": 0.047, "q": 0.014},
+    {"strike": 5100.0, "maturity": 0.50, "market_price": 108.50, "option_type": "PUT",  "bid": 107.0, "ask": 110.0, "r": 0.047, "q": 0.014},
+    {"strike": 5200.0, "maturity": 0.50, "market_price": 132.60, "option_type": "PUT",  "bid": 131.0, "ask": 134.2, "r": 0.047, "q": 0.014},
+    {"strike": 5300.0, "maturity": 0.50, "market_price": 161.80, "option_type": "PUT",  "bid": 160.0, "ask": 163.6, "r": 0.047, "q": 0.014},
+    {"strike": 5600.0, "maturity": 0.50, "market_price": 233.40, "option_type": "CALL", "bid": 232.0, "ask": 234.8, "r": 0.047, "q": 0.014},
+    {"strike": 5700.0, "maturity": 0.50, "market_price": 185.90, "option_type": "CALL", "bid": 184.0, "ask": 187.8, "r": 0.047, "q": 0.014},
+    {"strike": 5800.0, "maturity": 0.50, "market_price": 144.20, "option_type": "CALL", "bid": 143.0, "ask": 145.4, "r": 0.047, "q": 0.014},
+    {"strike": 5900.0, "maturity": 0.50, "market_price": 108.30, "option_type": "CALL", "bid": 107.0, "ask": 109.6, "r": 0.047, "q": 0.014},
+    {"strike": 5000.0, "maturity": 1.00, "market_price": 155.40, "option_type": "PUT",  "bid": 153.0, "ask": 157.8, "r": 0.045, "q": 0.015},
+    {"strike": 5100.0, "maturity": 1.00, "market_price": 180.70, "option_type": "PUT",  "bid": 178.0, "ask": 183.4, "r": 0.045, "q": 0.015},
+    {"strike": 5200.0, "maturity": 1.00, "market_price": 210.20, "option_type": "PUT",  "bid": 208.0, "ask": 212.4, "r": 0.045, "q": 0.015},
+    {"strike": 5300.0, "maturity": 1.00, "market_price": 244.50, "option_type": "PUT",  "bid": 242.0, "ask": 247.0, "r": 0.045, "q": 0.015},
+    {"strike": 5600.0, "maturity": 1.00, "market_price": 370.80, "option_type": "CALL", "bid": 368.0, "ask": 373.6, "r": 0.045, "q": 0.015},
+    {"strike": 5700.0, "maturity": 1.00, "market_price": 318.60, "option_type": "CALL", "bid": 316.0, "ask": 321.2, "r": 0.045, "q": 0.015},
+    {"strike": 5800.0, "maturity": 1.00, "market_price": 270.40, "option_type": "CALL", "bid": 268.0, "ask": 272.8, "r": 0.045, "q": 0.015},
+    {"strike": 5900.0, "maturity": 1.00, "market_price": 226.30, "option_type": "CALL", "bid": 224.0, "ask": 228.6, "r": 0.045, "q": 0.015}
+  ]
+}
