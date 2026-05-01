@@ -1,27 +1,17 @@
-tests/__pycache__/
-.pytest_cache
-.report_runfiles/
+# Build
+build/
+bates_cpp_project/build/
 
+# Python
 __pycache__/
 *.py[cod]
 *$py.class
-*.nbc
-*.nbi
-
-build/
-dist/
-*.egg-info/
-.eggs/
-
-
-.pytest_cache/
-.coverage
-htmlcov/
-.ipynb_checkpoints/
-
 .venv/
 venv/
-env/
+
+# IDE
 .vscode/
 .idea/
+
+# OS
 .DS_Store
